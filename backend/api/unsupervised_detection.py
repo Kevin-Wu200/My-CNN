@@ -5,7 +5,7 @@
 import logging
 from pathlib import Path
 from typing import Dict, Any
-from fastapi import APIRouter, UploadFile, File, HTTPException, status, Query
+from fastapi import APIRouter, UploadFile, File, HTTPException, status, Query, BackgroundTasks
 from fastapi.responses import JSONResponse
 import numpy as np
 
@@ -16,6 +16,7 @@ from backend.config.settings import (
 )
 from backend.utils.image_reader import ImageReader
 from backend.services.unsupervised_detection import UnsupervisedDiseaseDetectionService
+from backend.services.background_task_manager import get_task_manager
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ router = APIRouter(prefix="/unsupervised", tags=["unsupervised_detection"])
 # 初始化服务
 image_reader = ImageReader()
 detection_service = UnsupervisedDiseaseDetectionService()
+task_manager = get_task_manager()
 
 
 @router.post("/upload-image")
@@ -89,9 +91,10 @@ async def detect_disease(
     image_path: str = Query(..., description="影像文件路径"),
     n_clusters: int = Query(4, ge=2, le=10, description="K-means 聚类类别数"),
     min_area: int = Query(50, ge=10, description="最小斑块面积阈值"),
+    background_tasks: BackgroundTasks = None,
 ) -> Dict[str, Any]:
     """
-    执行无监督病害木检测接口
+    启动无监督病害木检测任务（异步）
 
     基于光谱、纹理和空间特征的传统非监督分类方法
 
@@ -99,9 +102,10 @@ async def detect_disease(
         image_path: 影像文件路径
         n_clusters: K-means 聚类类别数（推荐 3-6）
         min_area: 最小斑块面积阈值
+        background_tasks: FastAPI 后台任务
 
     Returns:
-        包含检测结果的 JSON 响应
+        包含任务ID的 JSON 响应
     """
     try:
         # 验证文件是否存在
@@ -112,15 +116,82 @@ async def detect_disease(
                 detail=f"影像文件不存在: {image_path}",
             )
 
-        # 读取影像
-        success, image_data, msg = image_reader.read_image(str(file_path))
-        if not success:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"影像读取失败: {msg}",
+        # 创建任务
+        task_id = task_manager.create_task("unsupervised_detection")
+
+        # 启动后台任务
+        if background_tasks:
+            background_tasks.add_task(
+                _run_unsupervised_detection,
+                task_id,
+                str(file_path),
+                n_clusters,
+                min_area,
             )
 
-        logger.info(f"开始检测影像: {file_path}")
+        logger.info(f"无监督检测任务已启动: {task_id}")
+
+        return {
+            "status": "started",
+            "task_id": task_id,
+            "message": "无监督病害木检测任务已启动，请使用任务ID查询进度",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"启动检测任务失败: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"启动检测任务失败: {str(e)}",
+        )
+
+
+@router.get("/task-status/{task_id}")
+async def get_detection_task_status(task_id: str) -> Dict[str, Any]:
+    """
+    查询无监督检测任务状态
+
+    Args:
+        task_id: 任务ID
+
+    Returns:
+        任务状态信息
+    """
+    task = task_manager.get_task_status(task_id)
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"任务不存在: {task_id}",
+        )
+
+    return task
+
+
+def _run_unsupervised_detection(
+    task_id: str, image_path: str, n_clusters: int, min_area: int
+) -> None:
+    """
+    后台执行无监督检测任务
+
+    Args:
+        task_id: 任务ID
+        image_path: 影像文件路径
+        n_clusters: K-means 聚类类别数
+        min_area: 最小斑块面积阈值
+    """
+    try:
+        # 标记任务为运行中
+        task_manager.start_task(task_id)
+        task_manager.update_progress(task_id, 10, "读取影像中")
+
+        # 读取影像
+        success, image_data, msg = image_reader.read_image(image_path)
+        if not success:
+            task_manager.fail_task(task_id, f"影像读取失败: {msg}")
+            return
+
+        task_manager.update_progress(task_id, 30, "执行检测中")
 
         # 执行无监督检测
         success, result, msg = detection_service.detect(
@@ -130,16 +201,16 @@ async def detect_disease(
         )
 
         if not success:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"检测失败: {msg}",
-            )
+            task_manager.fail_task(task_id, f"检测失败: {msg}")
+            return
+
+        task_manager.update_progress(task_id, 90, "处理结果中")
 
         # 保存检测结果
         result_data = {
             "status": "success",
             "message": "无监督病害木检测完成",
-            "image_path": str(file_path),
+            "image_path": image_path,
             "image_shape": image_data.shape,
             "n_clusters": result["n_clusters"],
             "n_candidates": result["n_candidates"],
@@ -151,16 +222,12 @@ async def detect_disease(
 
         logger.info(f"检测完成，发现 {result['n_candidates']} 个病害木候选区域")
 
-        return result_data
+        # 标记任务为完成
+        task_manager.complete_task(task_id, result_data)
 
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"检测过程中出错: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"检测失败: {str(e)}",
-        )
+        logger.error(f"检测任务执行失败: {str(e)}")
+        task_manager.fail_task(task_id, f"检测任务执行失败: {str(e)}")
 
 
 @router.get("/method-info")

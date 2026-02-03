@@ -17,6 +17,7 @@ logs/
 data/
 models/
 outputs/
+storage/
 
 #Frontend
 node_modules/

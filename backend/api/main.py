@@ -11,6 +11,7 @@ from backend.api.training_sample import router as training_router
 from backend.api.detection_config import router as detection_config_router
 from backend.api.unsupervised_detection import router as unsupervised_router
 from backend.api.upload import router as upload_router
+from backend.api.task_status import router as task_status_router
 from backend.utils.logger import LoggerSetup
 
 # 初始化日志
@@ -37,6 +38,7 @@ app.include_router(training_router)
 app.include_router(detection_config_router)
 app.include_router(unsupervised_router)
 app.include_router(upload_router)
+app.include_router(task_status_router)
 
 # 健康检查端点
 @app.get("/health")

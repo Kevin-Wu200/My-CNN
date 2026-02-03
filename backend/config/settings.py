@@ -9,21 +9,21 @@ from pathlib import Path
 # 项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
-# 数据目录配置
-DATA_DIR = PROJECT_ROOT / "data"
-UPLOAD_DIR = DATA_DIR / "uploads"
-TRAINING_SAMPLES_DIR = DATA_DIR / "training_samples"
-DETECTION_IMAGES_DIR = DATA_DIR / "detection_images"
-TEMP_DIR = DATA_DIR / "temp"
+# 存储目录配置
+STORAGE_DIR = PROJECT_ROOT / "storage"
+UPLOAD_DIR = STORAGE_DIR / "uploads"
+TRAINING_SAMPLES_DIR = STORAGE_DIR / "training_samples"
+DETECTION_IMAGES_DIR = STORAGE_DIR / "detection_images"
+TEMP_DIR = STORAGE_DIR / "temp"
 
 # 模型目录配置
-MODELS_DIR = PROJECT_ROOT / "models"
+MODELS_DIR = STORAGE_DIR / "models"
 
 # 日志目录配置
 LOGS_DIR = PROJECT_ROOT / "logs"
 
 # 数据库配置
-DATABASE_PATH = PROJECT_ROOT / "data" / "system.db"
+DATABASE_PATH = STORAGE_DIR / "system.db"
 
 # 影像处理配置
 IMAGE_PROCESSING_CONFIG = {
