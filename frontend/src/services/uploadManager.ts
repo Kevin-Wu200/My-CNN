@@ -1,0 +1,224 @@
+/**
+ * 上传管理器 - 主线程与 uploadWorker 的通信桥梁
+ *
+ * 职责：
+ * 1. 初始化和管理 uploadWorker
+ * 2. 启动文件上传任务
+ * 3. 监听上传进度和完成事件
+ * 4. 提供上传状态查询接口
+ */
+
+interface UploadProgressCallback {
+  (progress: number, uploadedChunks: number, totalChunks: number): void
+}
+
+interface UploadCompleteCallback {
+  (result: { filePath: string; fileName: string; fileSize: number; totalChunks: number }): void
+}
+
+interface UploadErrorCallback {
+  (error: { code: string; message: string; failedChunkIndex?: number }): void
+}
+
+interface UploadCallbacks {
+  onProgress?: UploadProgressCallback
+  onComplete?: UploadCompleteCallback
+  onError?: UploadErrorCallback
+}
+
+interface UploadSession {
+  uploadId: string
+  fileName: string
+  fileSize: number
+  status: 'uploading' | 'completed' | 'failed'
+  progress: number
+  uploadedChunks: number
+  totalChunks: number
+  callbacks: UploadCallbacks
+}
+
+class UploadManager {
+  private worker: Worker | null = null
+  private sessions = new Map<string, UploadSession>()
+  private static instance: UploadManager
+
+  private constructor() {
+    this.initializeWorker()
+  }
+
+  static getInstance(): UploadManager {
+    if (!UploadManager.instance) {
+      UploadManager.instance = new UploadManager()
+    }
+    return UploadManager.instance
+  }
+
+  /**
+   * 初始化 uploadWorker
+   */
+  private initializeWorker() {
+    try {
+      // 使用 new Worker 创建 uploadWorker
+      // 注意：需要在 vite.config.ts 中配置 worker 支持
+      this.worker = new Worker(new URL('./uploadWorker.ts', import.meta.url), { type: 'module' })
+
+      this.worker.onmessage = (event: MessageEvent) => {
+        this.handleWorkerMessage(event.data)
+      }
+
+      this.worker.onerror = (error: ErrorEvent) => {
+        console.error('[UploadManager] Worker 错误:', error.message)
+      }
+
+      console.log('[UploadManager] uploadWorker 初始化成功')
+    } catch (error) {
+      console.error('[UploadManager] uploadWorker 初始化失败:', error)
+    }
+  }
+
+  /**
+   * 处理 Worker 消息
+   */
+  private handleWorkerMessage(message: any) {
+    const { type, uploadId } = message
+    const session = this.sessions.get(uploadId)
+
+    if (!session) {
+      console.warn(`[UploadManager] 未找到上传会话: ${uploadId}`)
+      return
+    }
+
+    switch (type) {
+      case 'progress':
+        this.handleProgress(session, message)
+        break
+      case 'success':
+        this.handleSuccess(session, message)
+        break
+      case 'error':
+        this.handleError(session, message)
+        break
+    }
+  }
+
+  /**
+   * 处理进度更新
+   */
+  private handleProgress(session: UploadSession, message: any) {
+    session.progress = message.progress
+    session.uploadedChunks = message.uploadedChunks
+    session.totalChunks = message.totalChunks
+
+    console.log(`[UploadManager] 上传进度 [${session.uploadId}]:`, {
+      progress: session.progress,
+      uploadedChunks: session.uploadedChunks,
+      totalChunks: session.totalChunks,
+    })
+
+    session.callbacks.onProgress?.(session.progress, session.uploadedChunks, session.totalChunks)
+  }
+
+  /**
+   * 处理上传成功
+   */
+  private handleSuccess(session: UploadSession, message: any) {
+    session.status = 'completed'
+    session.progress = 100
+
+    console.log(`[UploadManager] 上传完成 [${session.uploadId}]:`, message.result)
+
+    session.callbacks.onComplete?.(message.result)
+
+    // 延迟清理会话
+    setTimeout(() => {
+      this.sessions.delete(session.uploadId)
+    }, 1000)
+  }
+
+  /**
+   * 处理上传错误
+   */
+  private handleError(session: UploadSession, message: any) {
+    session.status = 'failed'
+
+    console.error(`[UploadManager] 上传失败 [${session.uploadId}]:`, {
+      errorCode: message.errorCode,
+      errorMessage: message.errorMessage,
+      failedChunkIndex: message.failedChunkIndex,
+    })
+
+    session.callbacks.onError?.({
+      code: message.errorCode,
+      message: message.errorMessage,
+      failedChunkIndex: message.failedChunkIndex,
+    })
+
+    this.sessions.delete(session.uploadId)
+  }
+
+  /**
+   * 启动文件上传
+   */
+  async uploadFile(file: File, callbacks: UploadCallbacks): Promise<string> {
+    if (!this.worker) {
+      throw new Error('uploadWorker 未初始化')
+    }
+
+    const uploadId = this.generateUploadId()
+
+    const session: UploadSession = {
+      uploadId,
+      fileName: file.name,
+      fileSize: file.size,
+      status: 'uploading',
+      progress: 0,
+      uploadedChunks: 0,
+      totalChunks: 0,
+      callbacks,
+    }
+
+    this.sessions.set(uploadId, session)
+
+    console.log('[UploadManager] 启动文件上传:', {
+      uploadId,
+      fileName: file.name,
+      fileSize: file.size,
+    })
+
+    // 发送上传任务到 Worker
+    this.worker.postMessage({
+      uploadId,
+      type: 'upload',
+      data: { file },
+    })
+
+    return uploadId
+  }
+
+  /**
+   * 获取上传会话状态
+   */
+  getSession(uploadId: string): UploadSession | undefined {
+    return this.sessions.get(uploadId)
+  }
+
+  /**
+   * 生成上传 ID
+   */
+  private generateUploadId(): string {
+    return `upload_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  }
+
+  /**
+   * 销毁 Worker
+   */
+  destroy() {
+    if (this.worker) {
+      this.worker.terminate()
+      this.worker = null
+    }
+    this.sessions.clear()
+  }
+}
+
+export const uploadManager = UploadManager.getInstance()

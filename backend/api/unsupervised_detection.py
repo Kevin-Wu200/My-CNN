@@ -1,0 +1,242 @@
+"""
+无监督病害木检测 API 接口模块
+"""
+
+import logging
+from pathlib import Path
+from typing import Dict, Any
+from fastapi import APIRouter, UploadFile, File, HTTPException, status, Query
+from fastapi.responses import JSONResponse
+import numpy as np
+
+from backend.config.settings import (
+    UPLOAD_DIR,
+    DETECTION_IMAGES_DIR,
+    TEMP_DIR,
+)
+from backend.utils.image_reader import ImageReader
+from backend.services.unsupervised_detection import UnsupervisedDiseaseDetectionService
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/unsupervised", tags=["unsupervised_detection"])
+
+# 初始化服务
+image_reader = ImageReader()
+detection_service = UnsupervisedDiseaseDetectionService()
+
+
+@router.post("/upload-image")
+async def upload_detection_image(file: UploadFile = File(...)) -> Dict[str, Any]:
+    """
+    上传待检测影像接口
+
+    接收遥感影像文件（jpg、jpeg、png、tif、tiff 格式）
+
+    Args:
+        file: 上传的影像文件
+
+    Returns:
+        包含处理结果的 JSON 响应
+    """
+    try:
+        if not file.filename:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="文件名不能为空",
+            )
+
+        # 验证文件类型
+        allowed_extensions = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+        file_ext = Path(file.filename).suffix.lower()
+
+        if file_ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"不支持的文件格式: {file_ext}，支持格式: {allowed_extensions}",
+            )
+
+        # 保存上传的文件
+        upload_dir = Path(DETECTION_IMAGES_DIR)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        file_path = upload_dir / file.filename
+        with open(file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+
+        logger.info(f"影像文件上传成功: {file_path}")
+
+        return {
+            "status": "success",
+            "message": "影像文件上传成功",
+            "filename": file.filename,
+            "file_path": str(file_path),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"影像文件上传失败: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"影像文件上传失败: {str(e)}",
+        )
+
+
+@router.post("/detect")
+async def detect_disease(
+    image_path: str = Query(..., description="影像文件路径"),
+    n_clusters: int = Query(4, ge=2, le=10, description="K-means 聚类类别数"),
+    min_area: int = Query(50, ge=10, description="最小斑块面积阈值"),
+) -> Dict[str, Any]:
+    """
+    执行无监督病害木检测接口
+
+    基于光谱、纹理和空间特征的传统非监督分类方法
+
+    Args:
+        image_path: 影像文件路径
+        n_clusters: K-means 聚类类别数（推荐 3-6）
+        min_area: 最小斑块面积阈值
+
+    Returns:
+        包含检测结果的 JSON 响应
+    """
+    try:
+        # 验证文件是否存在
+        file_path = Path(image_path)
+        if not file_path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"影像文件不存在: {image_path}",
+            )
+
+        # 读取影像
+        success, image_data, msg = image_reader.read_image(str(file_path))
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"影像读取失败: {msg}",
+            )
+
+        logger.info(f"开始检测影像: {file_path}")
+
+        # 执行无监督检测
+        success, result, msg = detection_service.detect(
+            image_data,
+            n_clusters=n_clusters,
+            min_area=min_area,
+        )
+
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"检测失败: {msg}",
+            )
+
+        # 保存检测结果
+        result_data = {
+            "status": "success",
+            "message": "无监督病害木检测完成",
+            "image_path": str(file_path),
+            "image_shape": image_data.shape,
+            "n_clusters": result["n_clusters"],
+            "n_candidates": result["n_candidates"],
+            "method": result["method"],
+            "description": result["description"],
+            "center_points": result["center_points"],
+            "note": "该结果基于传统非监督分类方法，不是最终病害判定，适用于无标注或样本不足场景",
+        }
+
+        logger.info(f"检测完成，发现 {result['n_candidates']} 个病害木候选区域")
+
+        return result_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"检测过程中出错: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"检测失败: {str(e)}",
+        )
+
+
+@router.get("/method-info")
+async def get_method_info() -> Dict[str, Any]:
+    """
+    获取无监督检测方法说明接口
+
+    Returns:
+        方法说明信息
+    """
+    return {
+        "method": "传统非监督分类方法",
+        "description": "基于光谱、纹理和空间特征的无监督病害木检测",
+        "steps": [
+            {
+                "step": 1,
+                "name": "影像读取与标准化处理",
+                "description": "读取遥感影像，进行浮点型转换和波段归一化",
+            },
+            {
+                "step": 2,
+                "name": "像元级特征构建",
+                "description": "构建光谱特征（RGB、波段比值、归一化差异）和纹理特征（GLCM）",
+            },
+            {
+                "step": 3,
+                "name": "特征标准化",
+                "description": "对特征矩阵进行零均值、单位方差标准化",
+            },
+            {
+                "step": 4,
+                "name": "非监督聚类",
+                "description": "使用 K-means 聚类进行特征空间分组",
+            },
+            {
+                "step": 5,
+                "name": "病害木候选类别判定",
+                "description": "基于光谱和纹理特征判定病害木候选类别",
+            },
+            {
+                "step": 6,
+                "name": "空间后处理",
+                "description": "连通域分析、去除小斑块、计算几何中心",
+            },
+            {
+                "step": 7,
+                "name": "结果输出",
+                "description": "输出病害木候选区域栅格图和中心点位",
+            },
+        ],
+        "disease_mechanism": {
+            "description": "松材线虫病害机理",
+            "symptoms": [
+                "针叶失水、叶绿素下降",
+                "红波段反射增强、绿波段反射减弱",
+                "树冠结构破碎、分布不均",
+                "局部纹理更加粗糙",
+            ],
+        },
+        "parameters": {
+            "n_clusters": {
+                "description": "K-means 聚类类别数",
+                "recommended_range": [3, 6],
+                "default": 4,
+            },
+            "min_area": {
+                "description": "最小斑块面积阈值（像元数）",
+                "recommended_range": [30, 100],
+                "default": 50,
+            },
+        },
+        "limitations": [
+            "不使用深度学习模型",
+            "不依赖人工标注",
+            "适用于无标注或样本不足场景",
+            "结果为候选区域，不是最终病害判定",
+            "需要用户进行人工验证和修正",
+        ],
+    }

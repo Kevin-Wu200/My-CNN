@@ -1,0 +1,21 @@
+# 系统
+.DS_Store
+
+# .claude
+.claude/
+
+# Python
+venv/
+*.pyc
+__pycache__/
+
+# 说明文档
+docs/
+
+# Data / Model
+data/
+models/
+outputs/
+
+#Frontend
+node_modules/
