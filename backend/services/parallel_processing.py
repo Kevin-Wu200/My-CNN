@@ -104,7 +104,7 @@ class ParallelProcessingService:
             with Pool(processes=num_workers) as pool:
                 for tile_idx, tile in enumerate(tiles):
                     try:
-                        result = pool.apply_async(process_func, (tile,))
+                        result = pool.apply_async(process_func, tile)
                         results.append((tile_idx, result))
                         logger.debug(f"分块 {tile_idx} 已提交到工作进程池")
                     except Exception as e:
