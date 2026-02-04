@@ -493,6 +493,12 @@ class DiseaseTreeDetectionService:
         except Exception as e:
             logger.error(f"分块检测失败: {str(e)}")
             return False, None, f"分块检测失败: {str(e)}"
+
+    def merge_adjacent_detections(
+        self,
+        points: List[Dict],
+        merge_distance: float = 50.0,
+    ) -> Tuple[bool, Optional[List[Dict]], str]:
         """
         合并相邻或重叠的检测结果
 
