@@ -19,5 +19,9 @@ models/
 outputs/
 storage/
 
-#Frontend
+# Frontend
 node_modules/
+
+# Test reports
+test_reports/
+backups/
