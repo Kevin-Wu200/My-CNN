@@ -9,6 +9,11 @@ from multiprocessing import Pool, Manager
 from pathlib import Path
 from typing import Tuple, Optional, List, Callable, Dict, Any
 import logging
+import time
+import os
+import signal
+
+from backend.utils.resource_monitor import ResourceMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +56,58 @@ class ParallelProcessingService:
         return num_workers
 
     @staticmethod
+    def _cleanup_pool(pool: Pool, force: bool = False) -> None:
+        """
+        清理进程池资源
+
+        Args:
+            pool: 进程池对象
+            force: 是否强制终止所有工作进程
+        """
+        try:
+            if force:
+                logger.warning("强制终止所有工作进程...")
+                pool.terminate()
+                logger.info("已发送终止信号到所有工作进程")
+            else:
+                logger.debug("正常关闭进程池，等待所有工作进程完成...")
+                pool.close()
+
+            # 显式等待所有进程完全退出
+            logger.debug("等待所有工作进程完全退出...")
+            pool.join()
+            logger.info("所有工作进程已完全退出")
+
+        except Exception as e:
+            logger.error(f"进程池清理过程中出错: {str(e)}")
+
+    @staticmethod
+    def _force_terminate_workers(pool: Pool, timeout: int = 5) -> None:
+        """
+        强制终止工作进程
+
+        Args:
+            pool: 进程池对象
+            timeout: 等待超时时间（秒）
+        """
+        try:
+            logger.warning(f"尝试强制终止工作进程（超时时间: {timeout}秒）...")
+            pool.terminate()
+            start_time = time.time()
+
+            # 等待进程完全退出
+            while time.time() - start_time < timeout:
+                if not any(p.is_alive() for p in pool._pool):
+                    logger.info("所有工作进程已成功终止")
+                    return
+                time.sleep(0.1)
+
+            logger.warning(f"在 {timeout} 秒内未能完全终止所有工作进程")
+
+        except Exception as e:
+            logger.error(f"强制终止工作进程时出错: {str(e)}")
+
+    @staticmethod
     def process_tiles_parallel(
         tiles: List[Any],
         process_func: Callable,
@@ -76,6 +133,7 @@ class ParallelProcessingService:
         Returns:
             (处理是否成功, 处理结果列表, 错误信息列表, 消息)
         """
+        pool = None
         try:
             if not tiles or len(tiles) == 0:
                 return False, None, [], "分块列表为空"
@@ -100,17 +158,31 @@ class ParallelProcessingService:
             errors = []
             RESULT_TIMEOUT = 300  # 5分钟超时
 
-            # 使用进程池处理
-            with Pool(processes=num_workers) as pool:
+            # 创建进程池并记录生命周期
+            pool = Pool(processes=num_workers)
+            logger.info(
+                f"进程池已创建: {num_workers} 个工作进程, "
+                f"进程池ID: {id(pool)}"
+            )
+
+            try:
+                # 提交所有分块任务
                 for tile_idx, tile in enumerate(tiles):
                     try:
                         result = pool.apply_async(process_func, tile)
                         results.append((tile_idx, result))
-                        logger.debug(f"分块 {tile_idx} 已提交到工作进程池")
+                        logger.debug(
+                            f"分块 {tile_idx} 已提交到工作进程池 "
+                            f"(总进度: {tile_idx + 1}/{len(tiles)})"
+                        )
+                        # 每提交10个分块记录一次资源状态
+                        if (tile_idx + 1) % 10 == 0:
+                            ResourceMonitor.log_resource_status(f"分块提交进度 ({tile_idx + 1}/{len(tiles)})")
                     except Exception as e:
                         error_info = {
                             "tile_index": tile_idx,
                             "error": str(e),
+                            "stage": "submission",
                         }
                         errors.append(error_info)
                         logger.error(
@@ -118,36 +190,65 @@ class ParallelProcessingService:
                         )
 
                         if error_handling == "stop":
+                            logger.warning("错误处理模式为 'stop'，中断处理")
+                            ParallelProcessingService._cleanup_pool(pool, force=True)
                             return False, None, errors, f"分块处理中断: {str(e)}"
 
                 # 收集结果
                 processed_results = []
+                logger.info(f"开始收集 {len(results)} 个分块的处理结果...")
+                ResourceMonitor.log_resource_status("开始收集分块处理结果")
+
                 for result_idx, (tile_idx, result) in enumerate(results):
                     try:
+                        logger.debug(
+                            f"等待分块 {tile_idx} 的处理结果 "
+                            f"(进度: {result_idx + 1}/{len(results)}, 超时: {RESULT_TIMEOUT}秒)"
+                        )
+
                         # 增加超时机制，防止工作进程崩溃导致无限阻塞
                         tile_result = result.get(timeout=RESULT_TIMEOUT)
                         processed_results.append(tile_result)
-                        logger.debug(f"分块 {tile_idx} 处理完成")
+                        logger.info(
+                            f"分块 {tile_idx} 处理完成 "
+                            f"(进度: {result_idx + 1}/{len(results)})"
+                        )
+                        # 每完成10个分块记录一次资源状态
+                        if (result_idx + 1) % 10 == 0:
+                            ResourceMonitor.log_resource_status(f"分块完成进度 ({result_idx + 1}/{len(results)})")
+
                     except mp.TimeoutError:
                         error_info = {
                             "tile_index": tile_idx,
                             "result_index": result_idx,
                             "error": f"分块处理超时（>{RESULT_TIMEOUT}秒），可能是工作进程崩溃或卡死",
+                            "stage": "result_collection",
                         }
                         errors.append(error_info)
                         logger.error(
-                            f"分块 {tile_idx} 处理超时（>{RESULT_TIMEOUT}秒）"
+                            f"分块 {tile_idx} 处理超时（>{RESULT_TIMEOUT}秒）, "
+                            f"可能是工作进程崩溃或卡死"
                         )
 
+                        # 超时时强制终止工作进程
+                        logger.warning(
+                            f"分块 {tile_idx} 超时，尝试强制终止工作进程..."
+                        )
+                        ParallelProcessingService._force_terminate_workers(pool, timeout=5)
+
                         if error_handling == "stop":
+                            logger.warning("错误处理模式为 'stop'，中断处理")
+                            ParallelProcessingService._cleanup_pool(pool, force=True)
                             return False, None, errors, f"分块处理中断: 超时"
 
                         processed_results.append(None)
+
                     except Exception as e:
                         error_info = {
                             "tile_index": tile_idx,
                             "result_index": result_idx,
                             "error": str(e),
+                            "stage": "result_collection",
                         }
                         errors.append(error_info)
                         logger.error(
@@ -155,9 +256,24 @@ class ParallelProcessingService:
                         )
 
                         if error_handling == "stop":
+                            logger.warning("错误处理模式为 'stop'，中断处理")
+                            ParallelProcessingService._cleanup_pool(pool, force=True)
                             return False, None, errors, f"分块处理中断: {str(e)}"
 
                         processed_results.append(None)
+
+                logger.info(
+                    f"所有分块处理结果已收集: {len(processed_results)} 个结果, "
+                    f"{len(errors)} 个错误"
+                )
+
+            finally:
+                # 确保进程池被正确清理
+                logger.info(f"开始清理进程池 (ID: {id(pool)})...")
+                ResourceMonitor.log_resource_status(f"清理进程池前 (ID: {id(pool)})")
+                ParallelProcessingService._cleanup_pool(pool, force=False)
+                logger.info(f"进程池已清理 (ID: {id(pool)})")
+                ResourceMonitor.log_resource_status(f"清理进程池后 (ID: {id(pool)})")
 
             logger.info(
                 f"并行处理完成: {len(processed_results)} 个结果, "
@@ -171,6 +287,15 @@ class ParallelProcessingService:
 
         except Exception as e:
             logger.error(f"并行处理失败: {str(e)}")
+
+            # 异常时强制清理进程池
+            if pool is not None:
+                logger.warning("异常发生，强制清理进程池...")
+                try:
+                    ParallelProcessingService._cleanup_pool(pool, force=True)
+                except Exception as cleanup_error:
+                    logger.error(f"异常清理进程池时出错: {str(cleanup_error)}")
+
             return False, None, [], f"并行处理失败: {str(e)}"
 
     @staticmethod
@@ -192,6 +317,7 @@ class ParallelProcessingService:
         Returns:
             (处理是否成功, 处理结果列表, 错误信息或成功消息)
         """
+        pool = None
         try:
             if not chunk_data_list:
                 return False, None, "块数据列表为空"
@@ -211,9 +337,27 @@ class ParallelProcessingService:
                 f"{num_workers} 个工作进程"
             )
 
-            # 使用进程池处理
-            with Pool(processes=num_workers) as pool:
+            # 创建进程池并记录生命周期
+            pool = Pool(processes=num_workers)
+            logger.info(
+                f"进程池已创建: {num_workers} 个工作进程, "
+                f"进程池ID: {id(pool)}"
+            )
+            ResourceMonitor.log_resource_status(f"进程池创建后 (ID: {id(pool)})")
+
+            try:
+                # 使用进程池处理
+                logger.debug(f"提交 {len(chunk_data_list)} 个块到进程池...")
                 results = pool.map(process_func, chunk_data_list)
+                logger.info(f"所有块已处理: {len(results)} 个结果")
+
+            finally:
+                # 确保进程池被正确清理
+                logger.info(f"开始清理进程池 (ID: {id(pool)})...")
+                ResourceMonitor.log_resource_status(f"清理进程池前 (ID: {id(pool)})")
+                ParallelProcessingService._cleanup_pool(pool, force=False)
+                logger.info(f"进程池已清理 (ID: {id(pool)})")
+                ResourceMonitor.log_resource_status(f"清理进程池后 (ID: {id(pool)})")
 
             logger.info(f"并行处理完成: {len(results)} 个结果")
 
@@ -221,6 +365,15 @@ class ParallelProcessingService:
 
         except Exception as e:
             logger.error(f"并行处理失败: {str(e)}")
+
+            # 异常时强制清理进程池
+            if pool is not None:
+                logger.warning("异常发生，强制清理进程池...")
+                try:
+                    ParallelProcessingService._cleanup_pool(pool, force=True)
+                except Exception as cleanup_error:
+                    logger.error(f"异常清理进程池时出错: {str(cleanup_error)}")
+
             return False, None, f"并行处理失败: {str(e)}"
 
     @staticmethod

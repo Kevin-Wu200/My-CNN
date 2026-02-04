@@ -15,6 +15,7 @@ from backend.config.settings import (
     TEMP_DIR,
 )
 from backend.utils.image_reader import ImageReader
+from backend.utils.resource_monitor import ResourceMonitor
 from backend.services.unsupervised_detection import UnsupervisedDiseaseDetectionService
 from backend.services.background_task_manager import get_task_manager
 
@@ -182,11 +183,15 @@ def _run_unsupervised_detection(
     """
     try:
         # 标记任务为运行中
+        logger.info(f"[{task_id}] 后台任务已启动")
+        ResourceMonitor.log_resource_status(f"后台任务启动 [{task_id}]")
+
         task_manager.start_task(task_id)
         task_manager.update_progress(task_id, 10, "读取影像中")
         logger.info(f"[{task_id}] 任务已启动，开始读取影像")
 
         # 读取影像
+        logger.debug(f"[{task_id}] 读取影像: {image_path}")
         success, image_data, msg = image_reader.read_image(image_path)
         if not success:
             logger.error(f"[{task_id}] 影像读取失败: {msg}")
@@ -194,6 +199,7 @@ def _run_unsupervised_detection(
             return
 
         logger.info(f"[{task_id}] 影像读取成功，尺寸: {image_data.shape}")
+        ResourceMonitor.log_resource_status(f"影像读取完成 [{task_id}]")
         task_manager.update_progress(task_id, 30, "执行检测中")
 
         # 执行无监督检测，传递任务管理器用于进度跟踪
@@ -208,10 +214,12 @@ def _run_unsupervised_detection(
 
         if not success:
             logger.error(f"[{task_id}] 检测失败: {msg}")
+            ResourceMonitor.log_resource_status(f"检测失败 [{task_id}]")
             task_manager.fail_task(task_id, f"检测失败: {msg}")
             return
 
         logger.info(f"[{task_id}] 检测完成，开始处理结果")
+        ResourceMonitor.log_resource_status(f"检测完成，处理结果 [{task_id}]")
         task_manager.update_progress(task_id, 90, "处理结果中")
 
         # 保存检测结果
@@ -232,10 +240,12 @@ def _run_unsupervised_detection(
 
         # 标记任务为完成
         task_manager.complete_task(task_id, result_data)
-        logger.info(f"[{task_id}] 任务已完成")
+        logger.info(f"[{task_id}] 后台任务已完成")
+        ResourceMonitor.log_resource_status(f"后台任务完成 [{task_id}]")
 
     except Exception as e:
         logger.error(f"[{task_id}] 检测任务执行失败: {str(e)}")
+        ResourceMonitor.log_resource_status(f"后台任务异常 [{task_id}]")
         task_manager.fail_task(task_id, f"检测任务执行失败: {str(e)}")
 
 

@@ -19,6 +19,7 @@ import cv2
 
 from backend.utils.tile_utils import TilingService, Tile, DEFAULT_TILE_SIZE
 from backend.services.parallel_processing import ParallelProcessingService
+from backend.utils.resource_monitor import ResourceMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -475,49 +476,64 @@ class UnsupervisedDiseaseDetectionService:
             (处理是否成功, 处理结果字典, 错误信息或成功消息)
         """
         try:
+            logger.info(f"分块 {tile.tile_index} 处理开始")
+            ResourceMonitor.log_resource_status(f"分块 {tile.tile_index} 处理开始")
+
             tile_data = tile.data
             H, W = tile_data.shape[:2]
 
             # 第一步：影像归一化
+            logger.debug(f"分块 {tile.tile_index}: 开始影像归一化")
             success, normalized_image, msg = self.normalize_image(
                 tile_data, nodata_value
             )
             if not success:
+                logger.error(f"分块 {tile.tile_index}: 影像归一化失败 - {msg}")
                 return False, None, msg
 
             # 第二步和第三步：特征构建与标准化
+            logger.debug(f"分块 {tile.tile_index}: 开始特征构建与标准化")
             success, feature_matrix, msg = self.construct_feature_matrix(
                 normalized_image
             )
             if not success:
+                logger.error(f"分块 {tile.tile_index}: 特征构建失败 - {msg}")
                 return False, None, msg
 
             # 第四步：K-means 聚类
+            logger.debug(f"分块 {tile.tile_index}: 开始 K-means 聚类")
             success, labels, centers, msg = self.kmeans_clustering(
                 feature_matrix, n_clusters
             )
             if not success:
+                logger.error(f"分块 {tile.tile_index}: K-means 聚类失败 - {msg}")
                 return False, None, msg
 
             # 提取光谱特征用于候选类别判定
+            logger.debug(f"分块 {tile.tile_index}: 提取光谱特征")
             success, spectral_features, msg = self.extract_spectral_features(
                 normalized_image
             )
             if not success:
+                logger.error(f"分块 {tile.tile_index}: 光谱特征提取失败 - {msg}")
                 return False, None, msg
 
             # 第五步：病害木候选类别判定
+            logger.debug(f"分块 {tile.tile_index}: 开始病害木候选类别判定")
             success, candidate_mask, msg = self.identify_disease_candidates(
                 normalized_image, labels, centers, spectral_features
             )
             if not success:
+                logger.error(f"分块 {tile.tile_index}: 候选类别判定失败 - {msg}")
                 return False, None, msg
 
             # 第六步：空间后处理
+            logger.debug(f"分块 {tile.tile_index}: 开始空间后处理")
             success, processed_mask, center_points, msg = self.spatial_postprocessing(
                 candidate_mask, (H, W), min_area
             )
             if not success:
+                logger.error(f"分块 {tile.tile_index}: 空间后处理失败 - {msg}")
                 return False, None, msg
 
             # 转换中心点坐标到原始影像坐标系
@@ -542,12 +558,14 @@ class UnsupervisedDiseaseDetectionService:
             }
 
             logger.info(
-                f"分块 {tile.tile_index} 检测完成: {len(original_center_points)} 个候选点"
+                f"分块 {tile.tile_index} 处理完成: {len(original_center_points)} 个候选点"
             )
+            ResourceMonitor.log_resource_status(f"分块 {tile.tile_index} 处理完成")
             return True, result, "分块检测成功"
 
         except Exception as e:
             logger.error(f"分块 {tile.tile_index} 检测失败: {str(e)}")
+            ResourceMonitor.log_resource_status(f"分块 {tile.tile_index} 处理异常")
             return False, None, f"分块检测失败: {str(e)}"
 
     def detect_on_tiled_image(
@@ -591,10 +609,12 @@ class UnsupervisedDiseaseDetectionService:
 
             H, W, B = image_data.shape
             logger.info(
-                f"开始分块检测: 影像尺寸={W}x{H}, 分块尺寸={tile_size}x{tile_size}"
+                f"[{task_id}] 开始分块检测: 影像尺寸={W}x{H}, 分块尺寸={tile_size}x{tile_size}"
             )
+            ResourceMonitor.log_resource_status(f"分块检测开始 [{task_id}]")
 
             # 第一步：生成分块
+            logger.debug(f"[{task_id}] 生成分块中...")
             success, tiles, msg = TilingService.generate_tiles(
                 image_data,
                 tile_size=tile_size,
@@ -602,14 +622,16 @@ class UnsupervisedDiseaseDetectionService:
                 spatial_ref=self.spatial_ref,
             )
             if not success:
+                logger.error(f"[{task_id}] 分块生成失败: {msg}")
                 return False, None, msg
 
-            logger.info(f"已生成 {len(tiles)} 个分块")
+            logger.info(f"[{task_id}] 已生成 {len(tiles)} 个分块")
 
             # 第二步：处理分块
             if use_parallel:
                 # 并行处理
-                logger.info("使用并行处理分块")
+                logger.info(f"[{task_id}] 使用并行处理分块，工作进程数={num_workers}")
+                ResourceMonitor.log_resource_status(f"并行处理分块开始 [{task_id}]")
 
                 # 为每个瓦片准备参数元组
                 tile_args = [
@@ -627,13 +649,15 @@ class UnsupervisedDiseaseDetectionService:
                 )
 
                 if not success and len(tile_results) == 0:
+                    logger.error(f"[{task_id}] 并行处理失败: {msg}")
                     return False, None, msg
 
                 # 过滤掉错误结果
                 valid_results = [r for r in tile_results if r is not None and "error" not in r]
                 logger.info(
-                    f"并行处理完成: {len(valid_results)} 个成功, {len(errors)} 个失败"
+                    f"[{task_id}] 并行处理完成: {len(valid_results)} 个成功, {len(errors)} 个失败"
                 )
+                ResourceMonitor.log_resource_status(f"并行处理分块完成 [{task_id}]")
 
                 # 更新进度到 60%（处理分块完成）
                 if task_manager and task_id:
@@ -642,26 +666,29 @@ class UnsupervisedDiseaseDetectionService:
                     )
             else:
                 # 顺序处理
-                logger.info("使用顺序处理分块")
+                logger.info(f"[{task_id}] 使用顺序处理分块")
                 valid_results = []
-                for tile in tiles:
+                for tile_idx, tile in enumerate(tiles):
+                    logger.debug(f"[{task_id}] 处理分块 {tile_idx + 1}/{len(tiles)}")
                     success, result, msg = self._process_single_tile(
                         tile, n_clusters, min_area, nodata_value
                     )
                     if success:
                         valid_results.append(result)
                     else:
-                        logger.error(f"分块 {tile.tile_index} 处理失败: {msg}")
+                        logger.error(f"[{task_id}] 分块 {tile.tile_index} 处理失败: {msg}")
 
             if not valid_results:
+                logger.error(f"[{task_id}] 所有分块处理失败")
                 return False, None, "所有分块处理失败"
 
             # 第三步：合并结果
+            logger.debug(f"[{task_id}] 合并分块处理结果")
             all_center_points = []
             for tile_result in valid_results:
                 all_center_points.extend(tile_result["center_points"])
 
-            logger.info(f"共检测到 {len(all_center_points)} 个候选点")
+            logger.info(f"[{task_id}] 共检测到 {len(all_center_points)} 个候选点")
 
             # 第四步：结果输出
             result = {
@@ -676,11 +703,13 @@ class UnsupervisedDiseaseDetectionService:
                 "description": "基于 1024×1024 分块的光谱、纹理和空间特征无监督病害木检测",
             }
 
-            logger.info("分块检测完成")
+            logger.info(f"[{task_id}] 分块检测完成")
+            ResourceMonitor.log_resource_status(f"分块检测完成 [{task_id}]")
             return True, result, "分块检测成功"
 
         except Exception as e:
-            logger.error(f"分块检测失败: {str(e)}")
+            logger.error(f"[{task_id}] 分块检测失败: {str(e)}")
+            ResourceMonitor.log_resource_status(f"分块检测异常 [{task_id}]")
             return False, None, f"分块检测失败: {str(e)}"
 
     def detect(
@@ -715,6 +744,9 @@ class UnsupervisedDiseaseDetectionService:
         import gc
 
         try:
+            logger.info(f"[{task_id}] 无监督检测开始")
+            ResourceMonitor.log_resource_status(f"无监督检测开始 [{task_id}]")
+
             H, W, B = image_data.shape
             image_size = H * W
 
@@ -722,7 +754,7 @@ class UnsupervisedDiseaseDetectionService:
             # 大影像使用分块处理以降低内存占用和提高并行效率
             if image_size > 25000000:  # 5000×5000 像素
                 logger.info(
-                    f"影像尺寸较大 ({W}×{H})，使用分块处理 + 并行处理"
+                    f"[{task_id}] 影像尺寸较大 ({W}×{H})，使用分块处理 + 并行处理"
                 )
                 return self.detect_on_tiled_image(
                     image_data,
@@ -736,51 +768,64 @@ class UnsupervisedDiseaseDetectionService:
                 )
 
             # 小影像使用单线程处理
-            logger.info(f"影像尺寸较小 ({W}×{H})，使用单线程处理")
+            logger.info(f"[{task_id}] 影像尺寸较小 ({W}×{H})，使用单线程处理")
 
             # 第一步：影像归一化
+            logger.debug(f"[{task_id}] 第一步: 影像归一化")
             success, normalized_image, msg = self.normalize_image(
                 image_data, nodata_value
             )
             if not success:
+                logger.error(f"[{task_id}] 影像归一化失败: {msg}")
                 return False, None, msg
 
             # 第二步和第三步：特征构建与标准化
+            logger.debug(f"[{task_id}] 第二步和第三步: 特征构建与标准化")
             success, feature_matrix, msg = self.construct_feature_matrix(
                 normalized_image
             )
             if not success:
+                logger.error(f"[{task_id}] 特征构建失败: {msg}")
                 return False, None, msg
 
             # 第四步：K-means 聚类
+            logger.debug(f"[{task_id}] 第四步: K-means 聚类")
             success, labels, centers, msg = self.kmeans_clustering(
                 feature_matrix, n_clusters
             )
             if not success:
+                logger.error(f"[{task_id}] K-means 聚类失败: {msg}")
                 return False, None, msg
 
             # 提取光谱特征用于候选类别判定
+            logger.debug(f"[{task_id}] 提取光谱特征")
             success, spectral_features, msg = self.extract_spectral_features(
                 normalized_image
             )
             if not success:
+                logger.error(f"[{task_id}] 光谱特征提取失败: {msg}")
                 return False, None, msg
 
             # 第五步：病害木候选类别判定
+            logger.debug(f"[{task_id}] 第五步: 病害木候选类别判定")
             success, candidate_mask, msg = self.identify_disease_candidates(
                 normalized_image, labels, centers, spectral_features
             )
             if not success:
+                logger.error(f"[{task_id}] 候选类别判定失败: {msg}")
                 return False, None, msg
 
             # 第六步：空间后处理
+            logger.debug(f"[{task_id}] 第六步: 空间后处理")
             success, processed_mask, center_points, msg = self.spatial_postprocessing(
                 candidate_mask, (H, W), min_area
             )
             if not success:
+                logger.error(f"[{task_id}] 空间后处理失败: {msg}")
                 return False, None, msg
 
             # 第七步：结果输出
+            logger.debug(f"[{task_id}] 第七步: 结果输出")
             result = {
                 "candidate_mask": processed_mask,
                 "center_points": center_points,
@@ -795,9 +840,11 @@ class UnsupervisedDiseaseDetectionService:
             del spectral_features, candidate_mask, processed_mask
             gc.collect()
 
-            logger.info("无监督病害木检测完成")
+            logger.info(f"[{task_id}] 无监督检测完成，发现 {len(center_points)} 个候选点")
+            ResourceMonitor.log_resource_status(f"无监督检测完成 [{task_id}]")
             return True, result, "无监督病害木检测成功"
 
         except Exception as e:
-            logger.error(f"无监督病害木检测失败: {str(e)}")
+            logger.error(f"[{task_id}] 无监督检测失败: {str(e)}")
+            ResourceMonitor.log_resource_status(f"无监督检测异常 [{task_id}]")
             return False, None, f"无监督病害木检测失败: {str(e)}"
