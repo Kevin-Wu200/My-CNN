@@ -65,6 +65,7 @@ interface UploadTask {
   chunks: Blob[]
   totalChunks: number
   uploadedChunks: number
+  uploadedChunkIndexes: Set<number>
   failedChunks: Set<number>
   uploadingChunks: Set<number>
   chunkRetries: Map<number, number>
@@ -188,7 +189,7 @@ async function processUploadQueue(uploadId: string) {
 
   const queue: number[] = []
   for (let i = 0; i < task.totalChunks; i++) {
-    if (!task.failedChunks.has(i) && !task.uploadingChunks.has(i)) {
+    if (!task.failedChunks.has(i) && !task.uploadingChunks.has(i) && !task.uploadedChunkIndexes.has(i)) {
       queue.push(i)
     }
   }
@@ -201,8 +202,11 @@ async function processUploadQueue(uploadId: string) {
     uploadChunkWithRetry(uploadId, chunkIndex)
       .then(() => {
         task.uploadingChunks.delete(chunkIndex)
-        task.uploadedChunks++
-        sendProgress(uploadId, task.uploadedChunks, task.totalChunks)
+        if (!task.uploadedChunkIndexes.has(chunkIndex)) {
+          task.uploadedChunkIndexes.add(chunkIndex)
+          task.uploadedChunks = task.uploadedChunkIndexes.size
+          sendProgress(uploadId, task.uploadedChunks, task.totalChunks)
+        }
 
         // 继续处理队列
         processUploadQueue(uploadId)
@@ -216,7 +220,16 @@ async function processUploadQueue(uploadId: string) {
         task.uploadingChunks.delete(chunkIndex)
         task.failedChunks.add(chunkIndex)
         sendError(uploadId, UPLOAD_ERROR_CODES.CHUNK_RETRY_EXHAUSTED, error.message, chunkIndex)
-        uploadTasks.delete(uploadId)
+
+        // 如果失败分片过多（超过50%），中止上传
+        const failureRate = task.failedChunks.size / task.totalChunks
+        if (failureRate > 0.5) {
+          sendError(uploadId, UPLOAD_ERROR_CODES.CHUNK_UPLOAD_FAILED, `上传失败率过高 (${Math.round(failureRate * 100)}%)，已中止上传`)
+          uploadTasks.delete(uploadId)
+        } else {
+          // 继续处理队列中的其他分片
+          processUploadQueue(uploadId)
+        }
       })
   }
 }
@@ -322,6 +335,7 @@ async function handleUpload(uploadId: string, data: any) {
     chunks,
     totalChunks,
     uploadedChunks: 0,
+    uploadedChunkIndexes: new Set(),
     failedChunks: new Set(),
     uploadingChunks: new Set(),
     chunkRetries: new Map(),

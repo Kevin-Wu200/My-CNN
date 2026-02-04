@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Dict, Any
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 import shutil
 
 from backend.config.settings import (
@@ -32,6 +32,20 @@ class CompleteUploadRequest(BaseModel):
     fileName: str
     fileSize: int
     totalChunks: int
+
+    @field_validator("fileSize", "totalChunks")
+    @classmethod
+    def validate_positive(cls, v):
+        if v <= 0:
+            raise ValueError("必须大于 0")
+        return v
+
+    @field_validator("uploadId", "fileName")
+    @classmethod
+    def validate_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("不能为空")
+        return v
 
 
 @router.post("/chunk")
@@ -135,14 +149,26 @@ async def complete_upload(
         fileSize = request.fileSize
         totalChunks = request.totalChunks
 
+        logger.info(
+            f"完成上传请求: uploadId={uploadId}, fileName={fileName}, "
+            f"fileSize={fileSize}, totalChunks={totalChunks}"
+        )
+
         if not uploadId or not fileName:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="缺少必要参数: uploadId 或 fileName",
             )
 
+        if fileSize <= 0 or totalChunks <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="fileSize 和 totalChunks 必须大于 0",
+            )
+
         # 验证会话
         if uploadId not in upload_sessions:
+            logger.error(f"上传会话不存在: {uploadId}, 现有会话: {list(upload_sessions.keys())}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"上传会话不存在: {uploadId}",
@@ -151,10 +177,27 @@ async def complete_upload(
         session = upload_sessions[uploadId]
 
         # 验证所有分片是否已上传
-        if len(session["uploadedChunks"]) != totalChunks:
+        uploaded_count = len(session["uploadedChunks"])
+        if uploaded_count != totalChunks:
+            logger.warning(
+                f"分片不完整: uploadId={uploadId}, 已上传={uploaded_count}, "
+                f"总数={totalChunks}, 缺失分片={set(range(totalChunks)) - session['uploadedChunks']}"
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"分片不完整: 已上传 {len(session['uploadedChunks'])}/{totalChunks}",
+                detail=f"分片不完整: 已上传 {uploaded_count}/{totalChunks}",
+            )
+
+        # 验证分片索引是否连续（0 到 totalChunks-1）
+        expected_chunks = set(range(totalChunks))
+        if session["uploadedChunks"] != expected_chunks:
+            logger.error(
+                f"分片索引不连续: uploadId={uploadId}, 期望={expected_chunks}, "
+                f"实际={session['uploadedChunks']}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"分片索引不连续: 期望 {expected_chunks}, 实际 {session['uploadedChunks']}",
             )
 
         # 合并分片
