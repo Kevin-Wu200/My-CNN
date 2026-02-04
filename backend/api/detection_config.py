@@ -248,16 +248,19 @@ def _run_detection_task(
         # 标记任务为运行中
         task_manager.start_task(task_id)
         task_manager.update_progress(task_id, 10, "初始化检测任务")
+        logger.info(f"[{task_id}] 检测任务已启动，影像数: {len(image_paths)}")
 
         # 这里应该调用实际的检测服务
         # 目前作为占位符实现
         task_manager.update_progress(task_id, 50, "执行检测中")
+        logger.info(f"[{task_id}] 开始执行检测")
 
         # 模拟检测过程
         import time
         time.sleep(2)
 
         task_manager.update_progress(task_id, 90, "处理结果中")
+        logger.info(f"[{task_id}] 检测完成，开始处理结果")
 
         # 返回检测结果
         result_data = {
@@ -269,11 +272,11 @@ def _run_detection_task(
             "detection_results": [],
         }
 
-        logger.info(f"检测任务完成: {task_id}")
+        logger.info(f"[{task_id}] 检测任务完成")
 
         # 标记任务为完成
         task_manager.complete_task(task_id, result_data)
 
     except Exception as e:
-        logger.error(f"检测任务执行失败: {str(e)}")
+        logger.error(f"[{task_id}] 检测任务执行失败: {str(e)}")
         task_manager.fail_task(task_id, f"检测任务执行失败: {str(e)}")

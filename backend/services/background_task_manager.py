@@ -26,6 +26,7 @@ class BackgroundTaskManager:
     def __init__(self):
         """初始化任务管理器"""
         self.tasks: Dict[str, Dict[str, Any]] = {}
+        self.progress_timestamps: Dict[str, float] = {}  # 记录进度最后更新时间
 
     def create_task(self, task_type: str, user_id: Optional[str] = None) -> str:
         """
@@ -96,6 +97,9 @@ class BackgroundTaskManager:
         self.tasks[task_id]["progress"] = min(100, max(0, progress))
         if stage:
             self.tasks[task_id]["current_stage"] = stage
+
+        # 记录进度更新时间戳，用于检测进度是否卡住
+        self.progress_timestamps[task_id] = datetime.now().timestamp()
         return True
 
     def complete_task(self, task_id: str, result: Any = None) -> bool:
@@ -141,17 +145,42 @@ class BackgroundTaskManager:
         logger.error(f"任务失败: {task_id} - {error}")
         return True
 
-    def get_task_status(self, task_id: str) -> Optional[Dict[str, Any]]:
+    def get_task_status(self, task_id: str, stuck_threshold: int = 30) -> Optional[Dict[str, Any]]:
         """
         获取任务状态
 
         Args:
             task_id: 任务ID
+            stuck_threshold: 进度停留超过多少秒判定为卡住（默认30秒）
 
         Returns:
             任务状态字典，如果任务不存在返回None
         """
-        return self.tasks.get(task_id)
+        task = self.tasks.get(task_id)
+        if not task:
+            return None
+
+        # 检测进度是否卡住
+        if task["status"] == TaskStatus.RUNNING:
+            last_update = self.progress_timestamps.get(task_id)
+            if last_update:
+                time_since_update = datetime.now().timestamp() - last_update
+                if time_since_update > stuck_threshold:
+                    task["stuck"] = True
+                    task["stuck_duration"] = int(time_since_update)
+                    logger.warning(
+                        f"任务 {task_id} 进度卡住: "
+                        f"进度={task['progress']}%, "
+                        f"停留时间={time_since_update:.1f}秒"
+                    )
+                else:
+                    task["stuck"] = False
+                    task["stuck_duration"] = 0
+            else:
+                task["stuck"] = False
+                task["stuck_duration"] = 0
+
+        return task
 
     def get_all_tasks(self) -> Dict[str, Dict[str, Any]]:
         """

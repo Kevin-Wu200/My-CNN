@@ -287,19 +287,23 @@ def _run_training_task(
         # 标记任务为运行中
         task_manager.start_task(task_id)
         task_manager.update_progress(task_id, 10, "初始化训练任务")
+        logger.info(f"[{task_id}] 训练任务已启动，样本路径: {sample_path}")
 
         # 这里应该调用实际的训练服务
         # 目前作为占位符实现
         task_manager.update_progress(task_id, 30, "加载训练数据中")
+        logger.info(f"[{task_id}] 开始加载训练数据")
 
         # 模拟训练过程
         import time
         time.sleep(2)
 
         task_manager.update_progress(task_id, 60, "模型训练中")
+        logger.info(f"[{task_id}] 开始模型训练")
         time.sleep(2)
 
         task_manager.update_progress(task_id, 90, "保存模型中")
+        logger.info(f"[{task_id}] 开始保存模型")
 
         # 返回训练结果
         result_data = {
@@ -310,11 +314,11 @@ def _run_training_task(
             "model_path": f"{TRAINING_SAMPLES_DIR}/models/{task_id}.pth",
         }
 
-        logger.info(f"训练任务完成: {task_id}")
+        logger.info(f"[{task_id}] 训练任务完成")
 
         # 标记任务为完成
         task_manager.complete_task(task_id, result_data)
 
     except Exception as e:
-        logger.error(f"训练任务执行失败: {str(e)}")
+        logger.error(f"[{task_id}] 训练任务执行失败: {str(e)}")
         task_manager.fail_task(task_id, f"训练任务执行失败: {str(e)}")

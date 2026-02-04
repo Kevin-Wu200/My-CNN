@@ -184,26 +184,34 @@ def _run_unsupervised_detection(
         # 标记任务为运行中
         task_manager.start_task(task_id)
         task_manager.update_progress(task_id, 10, "读取影像中")
+        logger.info(f"[{task_id}] 任务已启动，开始读取影像")
 
         # 读取影像
         success, image_data, msg = image_reader.read_image(image_path)
         if not success:
+            logger.error(f"[{task_id}] 影像读取失败: {msg}")
             task_manager.fail_task(task_id, f"影像读取失败: {msg}")
             return
 
+        logger.info(f"[{task_id}] 影像读取成功，尺寸: {image_data.shape}")
         task_manager.update_progress(task_id, 30, "执行检测中")
 
-        # 执行无监督检测
+        # 执行无监督检测，传递任务管理器用于进度跟踪
+        logger.info(f"[{task_id}] 开始执行无监督检测")
         success, result, msg = detection_service.detect(
             image_data,
             n_clusters=n_clusters,
             min_area=min_area,
+            task_manager=task_manager,
+            task_id=task_id,
         )
 
         if not success:
+            logger.error(f"[{task_id}] 检测失败: {msg}")
             task_manager.fail_task(task_id, f"检测失败: {msg}")
             return
 
+        logger.info(f"[{task_id}] 检测完成，开始处理结果")
         task_manager.update_progress(task_id, 90, "处理结果中")
 
         # 保存检测结果
@@ -220,13 +228,14 @@ def _run_unsupervised_detection(
             "note": "该结果基于传统非监督分类方法，不是最终病害判定，适用于无标注或样本不足场景",
         }
 
-        logger.info(f"检测完成，发现 {result['n_candidates']} 个病害木候选区域")
+        logger.info(f"[{task_id}] 检测完成，发现 {result['n_candidates']} 个病害木候选区域")
 
         # 标记任务为完成
         task_manager.complete_task(task_id, result_data)
+        logger.info(f"[{task_id}] 任务已完成")
 
     except Exception as e:
-        logger.error(f"检测任务执行失败: {str(e)}")
+        logger.error(f"[{task_id}] 检测任务执行失败: {str(e)}")
         task_manager.fail_task(task_id, f"检测任务执行失败: {str(e)}")
 
 

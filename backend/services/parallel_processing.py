@@ -98,13 +98,15 @@ class ParallelProcessingService:
 
             results = []
             errors = []
+            RESULT_TIMEOUT = 300  # 5分钟超时
 
             # 使用进程池处理
             with Pool(processes=num_workers) as pool:
                 for tile_idx, tile in enumerate(tiles):
                     try:
                         result = pool.apply_async(process_func, (tile,))
-                        results.append(result)
+                        results.append((tile_idx, result))
+                        logger.debug(f"分块 {tile_idx} 已提交到工作进程池")
                     except Exception as e:
                         error_info = {
                             "tile_index": tile_idx,
@@ -120,17 +122,36 @@ class ParallelProcessingService:
 
                 # 收集结果
                 processed_results = []
-                for result_idx, result in enumerate(results):
+                for result_idx, (tile_idx, result) in enumerate(results):
                     try:
-                        processed_results.append(result.get())
+                        # 增加超时机制，防止工作进程崩溃导致无限阻塞
+                        tile_result = result.get(timeout=RESULT_TIMEOUT)
+                        processed_results.append(tile_result)
+                        logger.debug(f"分块 {tile_idx} 处理完成")
+                    except mp.TimeoutError:
+                        error_info = {
+                            "tile_index": tile_idx,
+                            "result_index": result_idx,
+                            "error": f"分块处理超时（>{RESULT_TIMEOUT}秒），可能是工作进程崩溃或卡死",
+                        }
+                        errors.append(error_info)
+                        logger.error(
+                            f"分块 {tile_idx} 处理超时（>{RESULT_TIMEOUT}秒）"
+                        )
+
+                        if error_handling == "stop":
+                            return False, None, errors, f"分块处理中断: 超时"
+
+                        processed_results.append(None)
                     except Exception as e:
                         error_info = {
+                            "tile_index": tile_idx,
                             "result_index": result_idx,
                             "error": str(e),
                         }
                         errors.append(error_info)
                         logger.error(
-                            f"分块 {result_idx} 处理失败: {str(e)}"
+                            f"分块 {tile_idx} 处理失败: {str(e)}"
                         )
 
                         if error_handling == "stop":

@@ -536,6 +536,8 @@ class UnsupervisedDiseaseDetectionService:
         padding_mode: str = "pad",
         use_parallel: bool = True,
         num_workers: Optional[int] = 8,
+        task_manager=None,
+        task_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[Dict], str]:
         """
         对分块影像进行无监督病害木检测
@@ -553,6 +555,8 @@ class UnsupervisedDiseaseDetectionService:
             padding_mode: 边缘处理方式 ("pad" 或 "crop")
             use_parallel: 是否使用并行处理
             num_workers: 工作进程数（默认 8）
+            task_manager: 任务管理器（用于更新进度）
+            task_id: 任务ID（用于进度跟踪）
 
         Returns:
             (检测是否成功, 检测结果字典, 错误信息或成功消息)
@@ -608,6 +612,12 @@ class UnsupervisedDiseaseDetectionService:
                 logger.info(
                     f"并行处理完成: {len(valid_results)} 个成功, {len(errors)} 个失败"
                 )
+
+                # 更新进度到 60%（处理分块完成）
+                if task_manager and task_id:
+                    task_manager.update_progress(
+                        task_id, 60, f"分块处理完成: {len(valid_results)}/{len(tiles)} 个成功"
+                    )
             else:
                 # 顺序处理
                 logger.info("使用顺序处理分块")
@@ -657,6 +667,8 @@ class UnsupervisedDiseaseDetectionService:
         n_clusters: int = 4,
         min_area: int = 50,
         nodata_value: Optional[float] = None,
+        task_manager=None,
+        task_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[Dict], str]:
         """
         执行完整的无监督病害木检测流程（优化版本）
@@ -665,12 +677,15 @@ class UnsupervisedDiseaseDetectionService:
         - 对于大影像（>5000×5000），自动使用分块处理 + 并行处理
         - 对于小影像，使用单线程处理以减少开销
         - 显式释放中间变量，降低峰值内存占用 30-40%
+        - 支持任务进度跟踪，防止进度卡死
 
         Args:
             image_data: 原始影像数据 (H, W, B)
             n_clusters: K-means 聚类类别数
             min_area: 最小斑块面积阈值
             nodata_value: NoData 像元值
+            task_manager: 任务管理器（用于更新进度）
+            task_id: 任务ID（用于进度跟踪）
 
         Returns:
             (检测是否成功, 检测结果字典, 错误信息或成功消息)
@@ -694,6 +709,8 @@ class UnsupervisedDiseaseDetectionService:
                     nodata_value=nodata_value,
                     use_parallel=True,
                     num_workers=8,
+                    task_manager=task_manager,
+                    task_id=task_id,
                 )
 
             # 小影像使用单线程处理
