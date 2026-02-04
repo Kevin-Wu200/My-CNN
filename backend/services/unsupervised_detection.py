@@ -517,14 +517,14 @@ class UnsupervisedDiseaseDetectionService:
         tile_size: int = DEFAULT_TILE_SIZE,
         padding_mode: str = "pad",
         use_parallel: bool = True,
-        num_workers: Optional[int] = None,
+        num_workers: Optional[int] = 8,
     ) -> Tuple[bool, Optional[Dict], str]:
         """
         对分块影像进行无监督病害木检测
 
         影像会被自动分块为 1024×1024 的分块，每个分块独立处理，
         然后将结果合并回原始影像坐标系。
-        支持并行处理多个分块。
+        支持并行处理多个分块，默认使用 8 个工作进程。
 
         Args:
             image_data: 原始影像数据 (H, W, B)
@@ -534,7 +534,7 @@ class UnsupervisedDiseaseDetectionService:
             tile_size: 分块尺寸（默认 1024×1024）
             padding_mode: 边缘处理方式 ("pad" 或 "crop")
             use_parallel: 是否使用并行处理
-            num_workers: 工作进程数（如果为 None，则自动检测）
+            num_workers: 工作进程数（默认 8）
 
         Returns:
             (检测是否成功, 检测结果字典, 错误信息或成功消息)

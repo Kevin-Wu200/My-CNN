@@ -30,7 +30,7 @@ IMAGE_PROCESSING_CONFIG = {
     # 影像分块大小（像素）
     "chunk_width": 1024,
     "chunk_height": 1024,
-    # 并行处理块数量
+    # 并行处理块数量（优化配置：8个分块并行处理）
     "parallel_chunks": 8,
     # 支持的影像格式
     "supported_formats": [".img", ".tif", ".tiff"],

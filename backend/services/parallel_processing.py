@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 # 系统配置
 MAX_WORKERS_LIMIT = 16  # 最大工作进程数上限
 MIN_WORKERS = 1  # 最小工作进程数
+DEFAULT_PARALLEL_WORKERS = 8  # 默认并行处理数量
 
 
 class ParallelProcessingService:
@@ -23,9 +24,10 @@ class ParallelProcessingService:
     @staticmethod
     def get_auto_worker_count(max_limit: int = MAX_WORKERS_LIMIT) -> int:
         """
-        自动获取工作进程数（基于 CPU 核心数）
+        自动获取工作进程数
 
-        系统会自动检测设备 CPU 核心数，并根据以下规则确定工作进程数：
+        系统优先使用默认的 8 个工作进程进行并行处理。
+        如果 CPU 核心数不足，则根据以下规则调整：
         - 使用 CPU 核心数的 1/2（向下取整）
         - 不超过 max_limit 上限
 
@@ -36,13 +38,14 @@ class ParallelProcessingService:
             自动计算的工作进程数
         """
         cpu_count = mp.cpu_count()
-        num_workers = min(cpu_count // 2, max_limit)
+        # 优先使用默认的 8 个工作进程
+        num_workers = min(DEFAULT_PARALLEL_WORKERS, cpu_count, max_limit)
         # 确保至少有 1 个工作进程
         num_workers = max(num_workers, MIN_WORKERS)
 
         logger.info(
             f"自动检测工作进程数: CPU 核心数={cpu_count}, "
-            f"使用工作进程数={num_workers}（CPU核心数的1/2）"
+            f"使用工作进程数={num_workers}（默认并行处理数={DEFAULT_PARALLEL_WORKERS}）"
         )
 
         return num_workers
