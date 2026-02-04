@@ -132,6 +132,73 @@ async function handleComputeTask(taskId: string, data: any): Promise<void> {
 }
 
 /**
+ * 调用后端API执行无监督检测（异步）
+ * @param filePath 影像文件路径
+ * @param nClusters K-means聚类数
+ * @param minArea 最小斑块面积
+ * @returns 返回任务ID
+ */
+async function startUnsupervisedDetection(
+  filePath: string,
+  nClusters: number,
+  minArea: number
+): Promise<string> {
+  try {
+    const params = new URLSearchParams({
+      image_path: filePath,
+      n_clusters: nClusters.toString(),
+      min_area: minArea.toString(),
+    })
+
+    const response = await fetch(`/api/unsupervised/detect?${params}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    })
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}))
+      throw new Error(
+        errorData.detail || `启动检测失败: ${response.statusText}`
+      )
+    }
+
+    const result = await response.json()
+    return result.task_id
+  } catch (error: any) {
+    throw new Error(`启动无监督检测失败: ${error.message}`)
+  }
+}
+
+/**
+ * 轮询任务状态
+ * @param taskId 任务ID
+ * @returns 返回任务状态
+ */
+async function pollTaskStatus(taskId: string): Promise<any> {
+  try {
+    const response = await fetch(`/api/tasks/status/${taskId}`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    })
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}))
+      throw new Error(
+        errorData.detail || `查询任务状态失败: ${response.statusText}`
+      )
+    }
+
+    return await response.json()
+  } catch (error: any) {
+    throw new Error(`查询任务状态失败: ${error.message}`)
+  }
+}
+
+/**
  * 调用后端API执行无监督检测
  * @param filePath 影像文件路径（由主线程上传后获得）
  * @param nClusters K-means聚类数
@@ -177,7 +244,7 @@ async function detectUnsupervisedDisease(
  *
  * 【改进】
  * - 文件上传已在主线程完成，Worker 接收文件路径
- * - Worker 只负责调用后端检测API
+ * - Worker 启动后台检测任务并轮询状态
  * - 真正执行无监督检测算法，而不是模拟逻辑
  */
 async function handleUnsupervisedTask(taskId: string, data: any): Promise<void> {
@@ -187,28 +254,64 @@ async function handleUnsupervisedTask(taskId: string, data: any): Promise<void> 
     // 【关键】这些操作现在在 Worker 线程中执行
     // 页面切换不会中断这个 Promise 链
 
-    // 步骤 1: 执行无监督检测
-    sendProgress(taskId, 30, '执行无监督检测中')
-    const detectionResult = await detectUnsupervisedDisease(
+    // 步骤 1: 启动后台检测任务
+    sendProgress(taskId, 10, '启动检测任务中')
+    const backendTaskId = await startUnsupervisedDetection(
       filePath,
       params.nClusters,
       params.minArea
     )
-    sendProgress(taskId, 80, '结果处理中')
+    sendProgress(taskId, 20, `检测任务已启动 (ID: ${backendTaskId})`)
 
-    // 步骤 2: 返回结果
-    const result = {
-      taskId,
-      type: 'unsupervised',
-      file_path: filePath,
-      nClusters: params.nClusters,
-      minArea: params.minArea,
-      completedAt: new Date().toISOString(),
-      detectionResult: detectionResult, // 真实检测结果
+    // 步骤 2: 轮询任务状态
+    let completed = false
+    let pollCount = 0
+    const maxPolls = 3600 // 最多轮询3600次（如果每次间隔1秒，则为1小时）
+    const pollInterval = 1000 // 轮询间隔（毫秒）
+
+    while (!completed && pollCount < maxPolls) {
+      await delay(pollInterval)
+      pollCount++
+
+      try {
+        const taskStatus = await pollTaskStatus(backendTaskId)
+
+        // 更新进度
+        const progress = Math.min(99, 20 + (taskStatus.progress || 0) * 0.8)
+        sendProgress(taskId, progress, taskStatus.current_stage || '处理中')
+
+        if (taskStatus.status === 'completed') {
+          completed = true
+          sendProgress(taskId, 100, '处理完成')
+
+          // 步骤 3: 返回结果
+          const result = {
+            taskId,
+            type: 'unsupervised',
+            file_path: filePath,
+            nClusters: params.nClusters,
+            minArea: params.minArea,
+            completedAt: new Date().toISOString(),
+            detectionResult: taskStatus.result, // 真实检测结果
+            backendTaskId: backendTaskId,
+          }
+
+          sendSuccess(taskId, result)
+        } else if (taskStatus.status === 'failed') {
+          throw new Error(taskStatus.error || '后端检测任务失败')
+        }
+      } catch (pollError: any) {
+        // 如果轮询失败，继续重试
+        console.warn(`轮询任务状态失败 (第${pollCount}次): ${pollError.message}`)
+        if (pollCount >= maxPolls) {
+          throw new Error(`任务超时: 轮询${maxPolls}次后仍未完成`)
+        }
+      }
     }
 
-    sendProgress(taskId, 100, '处理完成')
-    sendSuccess(taskId, result)
+    if (!completed) {
+      throw new Error(`任务超时: 轮询${maxPolls}次后仍未完成`)
+    }
   } catch (error: any) {
     sendError(
       taskId,

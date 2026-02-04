@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import Dict, Any
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
+from pydantic import BaseModel
 import shutil
 
 from backend.config.settings import (
@@ -23,6 +24,14 @@ router = APIRouter(prefix="/upload", tags=["upload"])
 
 # 上传会话存储（生产环境应使用 Redis）
 upload_sessions: Dict[str, Dict[str, Any]] = {}
+
+
+class CompleteUploadRequest(BaseModel):
+    """完成上传请求模型"""
+    uploadId: str
+    fileName: str
+    fileSize: int
+    totalChunks: int
 
 
 @router.post("/chunk")
@@ -109,22 +118,22 @@ async def upload_chunk(
 
 @router.post("/complete")
 async def complete_upload(
-    data: Dict[str, Any],
+    request: CompleteUploadRequest,
 ) -> Dict[str, Any]:
     """
     完成文件上传（合并所有分片）
 
     Args:
-        data: 包含 uploadId、fileName、fileSize、totalChunks 的字典
+        request: 包含 uploadId、fileName、fileSize、totalChunks 的请求体
 
     Returns:
         包含最终文件路径的 JSON 响应
     """
     try:
-        uploadId = data.get("uploadId")
-        fileName = data.get("fileName")
-        fileSize = data.get("fileSize")
-        totalChunks = data.get("totalChunks")
+        uploadId = request.uploadId
+        fileName = request.fileName
+        fileSize = request.fileSize
+        totalChunks = request.totalChunks
 
         if not uploadId or not fileName:
             raise HTTPException(

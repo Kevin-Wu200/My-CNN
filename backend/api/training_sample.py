@@ -6,7 +6,7 @@
 import logging
 from pathlib import Path
 from typing import Dict, Any
-from fastapi import APIRouter, UploadFile, File, HTTPException, status
+from fastapi import APIRouter, UploadFile, File, HTTPException, status, BackgroundTasks, Query
 from fastapi.responses import JSONResponse
 
 from backend.config.settings import (
@@ -17,6 +17,7 @@ from backend.config.settings import (
 )
 from backend.services.decompression import DecompressionService
 from backend.services.validation import ValidationService
+from backend.services.background_task_manager import get_task_manager
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ router = APIRouter(prefix="/training", tags=["training"])
 
 # 初始化服务
 decompression_service = DecompressionService(TEMP_DIR)
+task_manager = get_task_manager()
 
 
 @router.post("/upload-sample")
@@ -210,3 +212,109 @@ async def upload_detection_images(file: UploadFile = File(...)) -> Dict[str, Any
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"处理文件时出错: {str(e)}",
         )
+
+
+@router.post("/start-training")
+async def start_training(
+    sample_path: str = Query(..., description="训练样本路径"),
+    task_name: str = Query(..., description="训练任务名称"),
+    background_tasks: BackgroundTasks = None,
+) -> Dict[str, Any]:
+    """
+    启动训练任务（异步）
+
+    Args:
+        sample_path: 训练样本路径
+        task_name: 训练任务名称
+        background_tasks: FastAPI 后台任务
+
+    Returns:
+        包含任务ID的 JSON 响应
+    """
+    try:
+        # 验证样本路径是否存在
+        sample_dir = Path(sample_path)
+        if not sample_dir.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"训练样本路径不存在: {sample_path}",
+            )
+
+        # 创建任务
+        task_id = task_manager.create_task("training")
+
+        # 启动后台任务
+        if background_tasks:
+            background_tasks.add_task(
+                _run_training_task,
+                task_id,
+                sample_path,
+                task_name,
+            )
+
+        logger.info(f"训练任务已启动: {task_id}")
+
+        return {
+            "status": "started",
+            "task_id": task_id,
+            "message": "训练任务已启动，请使用任务ID查询进度",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"启动训练任务失败: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"启动训练任务失败: {str(e)}",
+        )
+
+
+def _run_training_task(
+    task_id: str,
+    sample_path: str,
+    task_name: str,
+) -> None:
+    """
+    后台执行训练任务
+
+    Args:
+        task_id: 任务ID
+        sample_path: 训练样本路径
+        task_name: 训练任务名称
+    """
+    try:
+        # 标记任务为运行中
+        task_manager.start_task(task_id)
+        task_manager.update_progress(task_id, 10, "初始化训练任务")
+
+        # 这里应该调用实际的训练服务
+        # 目前作为占位符实现
+        task_manager.update_progress(task_id, 30, "加载训练数据中")
+
+        # 模拟训练过程
+        import time
+        time.sleep(2)
+
+        task_manager.update_progress(task_id, 60, "模型训练中")
+        time.sleep(2)
+
+        task_manager.update_progress(task_id, 90, "保存模型中")
+
+        # 返回训练结果
+        result_data = {
+            "status": "success",
+            "message": "训练任务完成",
+            "task_name": task_name,
+            "sample_path": sample_path,
+            "model_path": f"{TRAINING_SAMPLES_DIR}/models/{task_id}.pth",
+        }
+
+        logger.info(f"训练任务完成: {task_id}")
+
+        # 标记任务为完成
+        task_manager.complete_task(task_id, result_data)
+
+    except Exception as e:
+        logger.error(f"训练任务执行失败: {str(e)}")
+        task_manager.fail_task(task_id, f"训练任务执行失败: {str(e)}")
