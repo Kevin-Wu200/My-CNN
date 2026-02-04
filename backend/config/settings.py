@@ -66,6 +66,12 @@ DETECTION_CONFIG = {
     "nms_threshold": 0.3,
 }
 
+# 数值库线程限制配置
+# 每个 worker 进程使用的线程数
+# 建议值：2-4
+# 计算方式：8 个 worker 进程 × 2 线程 = 16 个线程（而不是 64+ 个）
+NUMERICAL_LIBRARY_THREADS = 2
+
 # 确保必要目录存在
 def ensure_directories():
     """确保所有必要的目录都已创建"""
