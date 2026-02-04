@@ -1,6 +1,7 @@
 import { INTERRUPT_TYPES, INTERRUPT_TYPE_CATEGORIES, INTERRUPT_TYPE_TO_CATEGORY } from '@/constants'
 import type { EnhancedTask, PersistedTaskState, InterruptType } from '@/types'
 import { uploadManager } from './uploadManager'
+import { progressPoller } from './progressPoller'
 
 // 为了向后兼容，保留原有的Task接口
 export interface Task {
@@ -580,6 +581,51 @@ class TaskManagerImpl {
         throw new Error('Worker 未初始化')
       }
 
+      // 【第四步】启动后端进度轮询（每10秒查询一次）
+      // 这是一个备用机制，用于在 Worker 通信失败时从后端获取进度
+      console.log('[TaskManager] 启动后端进度轮询:', taskId)
+      progressPoller.startPolling({
+        taskId,
+        onProgress: (progress, stage) => {
+          // 后端进度更新
+          if (task.progress < progress) {
+            task.progress = progress
+            task.currentStage = stage
+            task.lastUpdatedAt = Date.now()
+            this.updateTaskState(task)
+          }
+        },
+        onComplete: (result) => {
+          // 后端任务完成
+          if (task.status !== 'completed') {
+            task.result = result
+            task.progress = 100
+            task.currentStage = '处理完成'
+            task.status = 'completed'
+            task.lastUpdatedAt = Date.now()
+            this.updateTaskState(task)
+            sessionStorage.setItem('detectionResult', JSON.stringify(result))
+            setTimeout(() => {
+              this.clearPersistedTaskState()
+            }, 1500)
+          }
+        },
+        onError: (error) => {
+          // 后端任务失败
+          if (task.status !== 'failed') {
+            task.status = 'failed'
+            task.error = error
+            task.interruptType = INTERRUPT_TYPES.BACKEND_INFERENCE_FAILED
+            task.interruptedAt = Date.now()
+            task.lastUpdatedAt = Date.now()
+            this.updateTaskState(task)
+          }
+        },
+        onStop: () => {
+          console.log('[TaskManager] 后端进度轮询已停止:', taskId)
+        },
+      })
+
       return taskId
     } catch (error: any) {
       // 上传失败，标记任务为失败
@@ -786,6 +832,51 @@ class TaskManagerImpl {
       } else {
         throw new Error('Worker 未初始化')
       }
+
+      // 【第四步】启动后端进度轮询（每10秒查询一次）
+      // 这是一个备用机制，用于在 Worker 通信失败时从后端获取进度
+      console.log('[TaskManager] 启动后端进度轮询:', taskId)
+      progressPoller.startPolling({
+        taskId,
+        onProgress: (progress, stage) => {
+          // 后端进度更新
+          if (task.progress < 20 + Math.round((progress / 100) * 80)) {
+            task.progress = 20 + Math.round((progress / 100) * 80)
+            task.currentStage = stage
+            task.lastUpdatedAt = Date.now()
+            this.updateTaskState(task)
+          }
+        },
+        onComplete: (result) => {
+          // 后端任务完成
+          if (task.status !== 'completed') {
+            task.result = result
+            task.progress = 100
+            task.currentStage = '处理完成'
+            task.status = 'completed'
+            task.lastUpdatedAt = Date.now()
+            this.updateTaskState(task)
+            sessionStorage.setItem('detectionResult', JSON.stringify(result))
+            setTimeout(() => {
+              this.clearPersistedTaskState()
+            }, 1500)
+          }
+        },
+        onError: (error) => {
+          // 后端任务失败
+          if (task.status !== 'failed') {
+            task.status = 'failed'
+            task.error = error
+            task.interruptType = INTERRUPT_TYPES.BACKEND_INFERENCE_FAILED
+            task.interruptedAt = Date.now()
+            task.lastUpdatedAt = Date.now()
+            this.updateTaskState(task)
+          }
+        },
+        onStop: () => {
+          console.log('[TaskManager] 后端进度轮询已停止:', taskId)
+        },
+      })
 
       return taskId
     } catch (error: any) {
