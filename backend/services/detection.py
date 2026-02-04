@@ -20,6 +20,28 @@ from backend.services.parallel_processing import ParallelProcessingService
 logger = logging.getLogger(__name__)
 
 
+# 模块级别的瓦片处理函数，用于多进程处理（必须在模块级别以支持pickle序列化）
+def _process_tile_for_parallel(args):
+    """
+    处理单个瓦片的模块级别函数
+
+    Args:
+        args: 包含 (service, tile) 的元组
+
+    Returns:
+        处理结果字典或错误字典
+    """
+    service, tile = args
+    try:
+        success, result, msg = service._process_single_tile(tile)
+        if not success:
+            return {"error": msg, "tile_index": tile.tile_index}
+        return result
+    except Exception as e:
+        logger.error(f"瓦片 {tile.tile_index} 处理异常: {str(e)}")
+        return {"error": str(e), "tile_index": tile.tile_index}
+
+
 class DiseaseTreeDetectionService:
     """病害木检测服务类"""
 
@@ -393,16 +415,16 @@ class DiseaseTreeDetectionService:
                 # 并行处理
                 logger.info("使用并行处理分块")
 
-                def process_tile_wrapper(tile):
-                    success, result, msg = self._process_single_tile(tile)
-                    if not success:
-                        return {"error": msg, "tile_index": tile.tile_index}
-                    return result
+                # 为每个瓦片准备参数元组
+                tile_args = [
+                    (self, tile)
+                    for tile in tiles
+                ]
 
                 success, tile_results, errors, msg = (
                     ParallelProcessingService.process_tiles_parallel(
-                        tiles,
-                        process_tile_wrapper,
+                        tile_args,
+                        _process_tile_for_parallel,
                         num_workers=num_workers,
                         error_handling="log",
                     )
