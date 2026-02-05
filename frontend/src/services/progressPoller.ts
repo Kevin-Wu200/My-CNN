@@ -19,7 +19,7 @@ const INITIAL_RETRY_DELAY = 2000  // 2秒
 const MAX_RETRY_DELAY = 30000     // 30秒
 
 // 后端API基础URL
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api'
 
 /**
  * 后端任务状态响应格式
@@ -104,7 +104,7 @@ class ProgressPoller {
     onFinish?: () => void
   ): Promise<void> {
     try {
-      const response = await fetch(`${API_BASE_URL}/tasks/status/${taskId}`)
+      const response = await fetch(`${API_BASE_URL}/unsupervised/task-status/${taskId}`)
 
       if (!response.ok) {
         if (response.status === 404) {

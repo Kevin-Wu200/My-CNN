@@ -167,6 +167,10 @@ async function startUnsupervisedDetection(
     const result = await response.json()
     return result.task_id
   } catch (error: any) {
+    // 区分网络错误和其他错误
+    if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
+      throw new Error(`启动无监督检测失败: 后端服务不可达（ECONNREFUSED）`)
+    }
     throw new Error(`启动无监督检测失败: ${error.message}`)
   }
 }
@@ -178,7 +182,7 @@ async function startUnsupervisedDetection(
  */
 async function pollTaskStatus(taskId: string): Promise<any> {
   try {
-    const response = await fetch(`/api/tasks/status/${taskId}`, {
+    const response = await fetch(`/api/unsupervised/task-status/${taskId}`, {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',
@@ -186,6 +190,9 @@ async function pollTaskStatus(taskId: string): Promise<any> {
     })
 
     if (!response.ok) {
+      if (response.status === 404) {
+        throw new Error(`任务不存在: ${taskId}`)
+      }
       const errorData = await response.json().catch(() => ({}))
       throw new Error(
         errorData.detail || `查询任务状态失败: ${response.statusText}`
@@ -194,6 +201,10 @@ async function pollTaskStatus(taskId: string): Promise<any> {
 
     return await response.json()
   } catch (error: any) {
+    // 区分网络错误和其他错误
+    if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
+      throw new Error(`查询任务状态失败: 后端服务不可达（ECONNREFUSED）`)
+    }
     throw new Error(`查询任务状态失败: ${error.message}`)
   }
 }
@@ -234,6 +245,10 @@ async function detectUnsupervisedDisease(
     const result = await response.json()
     return result
   } catch (error: any) {
+    // 区分网络错误和其他错误
+    if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
+      throw new Error(`无监督检测失败: 后端服务不可达（ECONNREFUSED）`)
+    }
     throw new Error(`无监督检测失败: ${error.message}`)
   }
 }
