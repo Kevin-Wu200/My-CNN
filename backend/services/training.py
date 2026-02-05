@@ -12,11 +12,16 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import logging
 import json
+import os
+import shutil
 from datetime import datetime
 
 from backend.utils.evaluation_metrics import EvaluationMetrics
 
 logger = logging.getLogger(__name__)
+
+# 模型文件大小限制（2GB）
+MAX_MODEL_SIZE = 2 * 1024 * 1024 * 1024
 
 
 class TrainingService:
@@ -41,6 +46,10 @@ class TrainingService:
         self.model_save_dir = model_save_dir or Path("./models")
         self.model_save_dir.mkdir(parents=True, exist_ok=True)
 
+        # 验证保存目录的写权限
+        if not os.access(str(self.model_save_dir), os.W_OK):
+            logger.warning(f"[SAVE_DIR_NOT_WRITABLE] path={self.model_save_dir}")
+
         # 训练历史记录
         self.training_history = {
             "train_loss": [],
@@ -51,6 +60,42 @@ class TrainingService:
             "val_recall": [],
             "val_f1": [],
         }
+
+    @staticmethod
+    def _validate_model_file(model_path: str) -> Tuple[bool, str]:
+        """
+        验证模型文件是否可以加载
+
+        Args:
+            model_path: 模型文件路径
+
+        Returns:
+            (验证是否通过, 错误信息)
+        """
+        try:
+            file_path = Path(model_path)
+
+            # 检查文件是否存在
+            if not file_path.exists():
+                return False, f"模型文件不存在: {model_path}"
+
+            # 检查文件是否可读
+            if not os.access(str(file_path), os.R_OK):
+                return False, f"模型文件不可读（权限问题）: {model_path}"
+
+            # 检查文件大小
+            file_size = file_path.stat().st_size
+            if file_size <= 0:
+                return False, f"模型文件大小无效: {file_size} bytes"
+
+            if file_size > MAX_MODEL_SIZE:
+                return False, f"模型文件过大: {file_size} bytes (限制: {MAX_MODEL_SIZE} bytes)"
+
+            logger.info(f"[MODEL_FILE_VALIDATION_PASS] filePath={model_path}, fileSize={file_size}")
+            return True, ""
+
+        except Exception as e:
+            return False, f"模型文件验证失败: {str(e)}"
 
     def train_epoch(
         self,
@@ -287,16 +332,47 @@ class TrainingService:
         """
         try:
             model_path = Path(model_path)
-            if not model_path.exists():
-                logger.error(f"模型文件不存在: {model_path}")
+
+            # 第一步：验证模型文件
+            valid, error_msg = TrainingService._validate_model_file(str(model_path))
+            if not valid:
+                logger.error(f"[MODEL_FILE_VALIDATION_FAILED] filePath={model_path}, error={error_msg}")
                 return False
 
-            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-            logger.info(f"模型加载成功: {model_path}")
-            return True
+            logger.info(f"[MODEL_FILE_VALIDATION_PASS] filePath={model_path}")
+
+            # 第二步：尝试加载模型
+            try:
+                state_dict = torch.load(model_path, map_location=self.device)
+                logger.info(f"[MODEL_LOADED] filePath={model_path}")
+            except Exception as load_error:
+                error_msg = f"模型文件损坏或格式错误: {str(load_error)}"
+                logger.error(f"[MODEL_LOAD_ERROR] filePath={model_path}, error={error_msg}")
+                return False
+
+            # 第三步：验证 state_dict
+            if not isinstance(state_dict, dict):
+                error_msg = "模型状态字典格式错误"
+                logger.error(f"[MODEL_STATE_DICT_INVALID] filePath={model_path}")
+                return False
+
+            if not state_dict:
+                error_msg = "模型状态字典为空"
+                logger.error(f"[MODEL_STATE_DICT_EMPTY] filePath={model_path}")
+                return False
+
+            # 第四步：加载到模型
+            try:
+                self.model.load_state_dict(state_dict)
+                logger.info(f"[MODEL_LOAD_SUCCESS] filePath={model_path}")
+                return True
+            except Exception as load_error:
+                error_msg = f"模型权重加载失败: {str(load_error)}"
+                logger.error(f"[MODEL_WEIGHT_LOAD_ERROR] filePath={model_path}, error={error_msg}")
+                return False
 
         except Exception as e:
-            logger.error(f"模型加载失败: {str(e)}")
+            logger.error(f"[MODEL_LOAD_EXCEPTION] filePath={model_path}, error={str(e)}")
             return False
 
     def save_training_history(self, history_path: str) -> bool:
