@@ -437,8 +437,33 @@ class BackgroundTaskManager:
                     f"文件大小不匹配: 期望 {fileSize}, 实际 {actual_size}"
                 )
 
+            logger.info(f"[MERGE_COMBINING_COMPLETE] uploadId={uploadId}")
+
+            # 显式校验完整文件（第三步）
+            logger.info(f"[FILE_VALIDATION_START] uploadId={uploadId}, filePath={output_path}")
+
+            # 检查文件是否存在
+            if not output_path.exists():
+                raise FileNotFoundError(f"合并后文件不存在: {output_path}")
+            logger.info(f"[FILE_EXISTS_CHECK_PASS] uploadId={uploadId}")
+
+            # 检查文件大小是否大于 0
+            if actual_size <= 0:
+                output_path.unlink()
+                raise ValueError(f"文件大小无效: {actual_size}")
+            logger.info(f"[FILE_SIZE_CHECK_PASS] uploadId={uploadId}, size={actual_size}")
+
+            # 检查文件是否可读
+            try:
+                with open(output_path, "rb") as test_file:
+                    test_file.read(1)
+                logger.info(f"[FILE_READABLE_CHECK_PASS] uploadId={uploadId}")
+            except Exception as read_error:
+                output_path.unlink()
+                raise IOError(f"文件不可读: {str(read_error)}")
+
             logger.info(
-                f"[MERGE_COMPLETE] uploadId={uploadId}, filePath={output_path}, "
+                f"[FILE_VALIDATION_COMPLETE] uploadId={uploadId}, filePath={output_path}, "
                 f"fileSize={actual_size}"
             )
 

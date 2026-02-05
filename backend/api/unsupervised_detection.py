@@ -90,10 +90,10 @@ async def upload_detection_image(file: UploadFile = File(...)) -> Dict[str, Any]
 
 @router.post("/detect")
 async def detect_disease(
+    background_tasks: BackgroundTasks,
     image_path: str = Query(..., description="影像文件路径"),
     n_clusters: int = Query(4, ge=2, le=10, description="K-means 聚类类别数"),
     min_area: int = Query(50, ge=10, description="最小斑块面积阈值"),
-    background_tasks: BackgroundTasks,
 ) -> Dict[str, Any]:
     """
     启动无监督病害木检测任务（异步）
@@ -240,6 +240,42 @@ def _run_unsupervised_detection(
         # 标记任务为运行中
         logger.info(f"[{task_id}] 后台任务已启动")
         ResourceMonitor.log_resource_status(f"后台任务启动 [{task_id}]")
+
+        # 第五步：在检测开始前增加文件存在性检查
+        logger.info(f"[{task_id}] 开始文件就绪检查")
+        file_path = Path(image_path)
+
+        # 检查文件是否存在
+        if not file_path.exists():
+            error_msg = f"文件不存在: {image_path}"
+            logger.error(f"[{task_id}] {error_msg}")
+            task_manager.fail_task(task_id, error_msg)
+            return
+
+        logger.info(f"[{task_id}] 文件存在检查通过")
+
+        # 检查文件大小是否大于 0
+        file_size = file_path.stat().st_size
+        if file_size <= 0:
+            error_msg = f"文件大小无效: {file_size}"
+            logger.error(f"[{task_id}] {error_msg}")
+            task_manager.fail_task(task_id, error_msg)
+            return
+
+        logger.info(f"[{task_id}] 文件大小检查通过: {file_size} bytes")
+
+        # 检查文件是否可读
+        try:
+            with open(file_path, "rb") as test_file:
+                test_file.read(1)
+            logger.info(f"[{task_id}] 文件可读性检查通过")
+        except Exception as read_error:
+            error_msg = f"文件不可读: {str(read_error)}"
+            logger.error(f"[{task_id}] {error_msg}")
+            task_manager.fail_task(task_id, error_msg)
+            return
+
+        logger.info(f"[{task_id}] 文件就绪检查完成，开始读取影像")
 
         task_manager.update_progress(task_id, 10, "读取影像中")
         logger.info(f"[{task_id}] 开始读取影像")

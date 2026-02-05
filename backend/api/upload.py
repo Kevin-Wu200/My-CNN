@@ -8,7 +8,7 @@ import logging
 import os
 import json
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
 from pydantic import BaseModel, field_validator
 import shutil
@@ -59,8 +59,8 @@ class UploadStatusResponse(BaseModel):
     progress: int  # 0-100
     uploadedChunks: int
     totalChunks: int
-    filePath: str | None = None
-    errorMessage: str | None = None
+    filePath: Optional[str] = None
+    errorMessage: Optional[str] = None
 
 
 @router.post("/chunk")
