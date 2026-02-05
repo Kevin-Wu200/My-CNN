@@ -319,9 +319,11 @@ def setup_signal_handlers() -> None:
 @app.on_event("startup")
 async def startup_event():
     """应用启动事件"""
-    logger.info("FastAPI 应用启动")
+    logger.info("=" * 60)
+    logger.info("FastAPI 应用启动完成")
     logger.info(f"进程 ID: {mp.current_process().pid}")
     logger.info(f"CPU 核心数: {mp.cpu_count()}")
+    logger.info("=" * 60)
 
     # 限制数值库线程数
     logger.info("配置数值库线程限制...")
@@ -329,6 +331,10 @@ async def startup_event():
 
     # 记录线程配置信息
     log_thread_configuration()
+
+    logger.info("=" * 60)
+    logger.info("后端服务已准备就绪，监听 0.0.0.0:8000")
+    logger.info("=" * 60)
 
 
 # 应用关闭事件

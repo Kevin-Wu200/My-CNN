@@ -113,9 +113,9 @@ class ProgressPoller {
           onFinish?.()
           return
         }
-        // 后端不可达（5xx 错误或连接失败），停止轮询
-        console.error(`[ProgressPoller] 后端不可达: ${taskId} (HTTP ${response.status})`)
-        onError?.(`后端服务不可达 (HTTP ${response.status})`)
+        // 后端返回错误（5xx 错误），停止轮询
+        console.error(`[ProgressPoller] 后端返回错误: ${taskId} (HTTP ${response.status})`)
+        onError?.(`后端服务返回错误 (HTTP ${response.status})`)
         this.stopPolling(taskId)
         onFinish?.()
         return
@@ -152,7 +152,23 @@ class ProgressPoller {
 
       onFinish?.()
     } catch (error) {
-      console.error(`[ProgressPoller] 轮询异常: ${taskId}`, error)
+      // 捕获网络错误（包括 ECONNREFUSED）
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      console.error(`[ProgressPoller] 轮询异常: ${taskId}, 错误: ${errorMessage}`, error)
+
+      // 检查是否是连接错误
+      const isConnectionError = errorMessage.includes('Failed to fetch') ||
+                                errorMessage.includes('ECONNREFUSED') ||
+                                errorMessage.includes('ERR_CONNECTION_REFUSED') ||
+                                errorMessage.includes('Network request failed')
+
+      if (isConnectionError) {
+        console.error(`[ProgressPoller] 检测到连接错误，停止轮询: ${taskId}`)
+        onError?.(`无法连接到后端服务，请检查服务是否正常运行`)
+        this.stopPolling(taskId)
+        onFinish?.()
+        return
+      }
 
       const currentRetries = this.retryCount.get(taskId) || 0
 
@@ -176,7 +192,7 @@ class ProgressPoller {
         this.retryTimeouts.set(taskId, retryTimeout)
       } else {
         console.error(`[ProgressPoller] 达到最大重试次数，停止轮询: ${taskId}`)
-        onError?.(`轮询失败: ${error instanceof Error ? error.message : '未知错误'}（已重试${MAX_RETRIES}次）`)
+        onError?.(`轮询失败: ${errorMessage}（已重试${MAX_RETRIES}次）`)
         this.stopPolling(taskId)
       }
 

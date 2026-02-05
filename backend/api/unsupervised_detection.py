@@ -110,9 +110,12 @@ async def detect_disease(
         包含任务ID的 JSON 响应
     """
     try:
+        logger.info(f"[API] 收到无监督检测请求: image_path={image_path}, n_clusters={n_clusters}, min_area={min_area}")
+
         # 验证文件是否存在
         file_path = Path(image_path)
         if not file_path.exists():
+            logger.warning(f"[API] 影像文件不存在: {image_path}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"影像文件不存在: {image_path}",
@@ -120,6 +123,7 @@ async def detect_disease(
 
         # 预创建任务ID（用于返回给客户端）
         task_id = str(uuid.uuid4())
+        logger.info(f"[API] 创建任务ID: {task_id}")
 
         # 启动后台任务（任务创建移到后台函数内部）
         background_tasks.add_task(
@@ -130,7 +134,7 @@ async def detect_disease(
             min_area,
         )
 
-        logger.info(f"无监督检测任务已提交: {task_id}")
+        logger.info(f"[API] 无监督检测任务已提交到后台: {task_id}")
 
         return {
             "status": "started",
@@ -141,7 +145,7 @@ async def detect_disease(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"启动检测任务失败: {str(e)}")
+        logger.error(f"[API] 启动检测任务失败: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"启动检测任务失败: {str(e)}",
@@ -175,6 +179,11 @@ def _run_unsupervised_detection_safe(
     """
     安全包装器：确保任务创建和异常处理
 
+    关键保证：
+    - 任何异常都被捕获，不会导致服务进程退出
+    - 任务状态始终被正确更新
+    - 后端 Web 服务生命周期独立于单次任务
+
     Args:
         task_id: 任务ID
         image_path: 影像文件路径
@@ -182,26 +191,37 @@ def _run_unsupervised_detection_safe(
         min_area: 最小斑块面积阈值
     """
     try:
+        logger.info(f"[后台任务] 开始执行任务: {task_id}")
+
         # 在后台线程中创建任务，使用指定的 task_id（确保任务ID一致）
         task_manager.create_task("unsupervised_detection", task_id=task_id)
+        logger.info(f"[后台任务] 任务已创建: {task_id}")
 
         # 立即标记为运行中
         task_manager.start_task(task_id)
+        logger.info(f"[后台任务] 任务已标记为运行中: {task_id}")
 
         # 执行实际任务
         _run_unsupervised_detection(task_id, image_path, n_clusters, min_area)
+        logger.info(f"[后台任务] 任务执行完成: {task_id}")
 
     except Exception as e:
         # 捕获所有异常，确保任务状态被正确更新
-        logger.error(f"[{task_id}] 任务执行异常: {str(e)}", exc_info=True)
+        # 关键：这里的异常不会导致服务进程退出
+        logger.error(f"[后台任务] 任务执行异常: {task_id}, 错误: {str(e)}", exc_info=True)
 
         # 如果任务已创建，标记为失败
         if task_id in task_manager.tasks:
             task_manager.fail_task(task_id, f"任务执行异常: {str(e)}")
+            logger.info(f"[后台任务] 任务已标记为失败: {task_id}")
         else:
             # 如果任务未创建，创建并标记为失败
-            task_manager.create_task("unsupervised_detection", task_id=task_id)
-            task_manager.fail_task(task_id, f"任务初始化失败: {str(e)}")
+            try:
+                task_manager.create_task("unsupervised_detection", task_id=task_id)
+                task_manager.fail_task(task_id, f"任务初始化失败: {str(e)}")
+                logger.info(f"[后台任务] 任务已创建并标记为失败: {task_id}")
+            except Exception as create_error:
+                logger.error(f"[后台任务] 创建失败任务记录失败: {task_id}, 错误: {str(create_error)}", exc_info=True)
 
 
 def _run_unsupervised_detection(
