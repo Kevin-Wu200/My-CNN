@@ -401,18 +401,19 @@ class BackgroundTaskManager:
         try:
             from backend.config.settings import TEMP_DIR, DETECTION_IMAGES_DIR
             from backend.models.database import UploadSession, get_db_manager
+            from backend.utils.file_path_manager import FilePathManager
 
             logger.info(f"[MERGE_EXECUTING] taskId={task_id}, uploadId={uploadId}")
 
             # 更新任务进度
             self.update_progress(task_id, 10, "准备合并文件")
 
-            # 合并分片
-            session_dir = Path(TEMP_DIR) / uploadId
-            output_dir = Path(DETECTION_IMAGES_DIR)
-            output_dir.mkdir(parents=True, exist_ok=True)
+            # 步骤7: 统一文件路径来源 - 使用 FilePathManager 获取路径
+            session_dir = FilePathManager.get_chunk_dir(uploadId)
+            output_dir = FilePathManager.get_detection_images_dir()
+            FilePathManager.ensure_directory_exists(output_dir)
 
-            output_path = output_dir / fileName
+            output_path = FilePathManager.get_merged_file_path(fileName)
 
             # 步骤4: 在合并逻辑中增加明确日志 - 开始合并
             logger.info(
@@ -422,7 +423,8 @@ class BackgroundTaskManager:
 
             with open(output_path, "wb") as output_file:
                 for i in range(totalChunks):
-                    chunk_path = session_dir / f"chunk_{i}"
+                    # 步骤7: 统一文件路径来源 - 使用 FilePathManager 获取分片路径
+                    chunk_path = FilePathManager.get_chunk_path(uploadId, i)
                     if not chunk_path.exists():
                         raise FileNotFoundError(f"分片文件丢失: chunk_{i}")
 

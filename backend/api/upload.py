@@ -23,6 +23,7 @@ from backend.config.settings import (
     TEMP_DIR,
 )
 from backend.models.database import UploadSession, get_db_manager
+from backend.utils.file_path_manager import FilePathManager
 
 logger = logging.getLogger(__name__)
 
@@ -138,12 +139,12 @@ async def upload_chunk(
                 detail="文件名不能为空",
             )
 
-        # 创建上传会话目录
-        session_dir = Path(TEMP_DIR) / uploadId
-        session_dir.mkdir(parents=True, exist_ok=True)
+        # 步骤7: 统一文件路径来源 - 使用 FilePathManager 获取路径
+        session_dir = FilePathManager.get_chunk_dir(uploadId)
+        FilePathManager.ensure_directory_exists(session_dir)
 
         # 保存分片文件
-        chunk_path = session_dir / f"chunk_{chunkIndex}"
+        chunk_path = FilePathManager.get_chunk_path(uploadId, chunkIndex)
         chunk_content = await chunk.read()
 
         with open(chunk_path, "wb") as f:
@@ -427,8 +428,8 @@ async def cleanup_old_sessions() -> Dict[str, Any]:
         cleaned_count = 0
         for session in old_sessions:
             try:
-                # 删除临时文件
-                session_dir = Path(TEMP_DIR) / session.upload_id
+                # 步骤7: 统一文件路径来源 - 使用 FilePathManager 获取临时目录
+                session_dir = FilePathManager.get_chunk_dir(session.upload_id)
                 if session_dir.exists():
                     shutil.rmtree(session_dir, ignore_errors=True)
                     logger.info(f"[CLEANUP_TEMP] uploadId={session.upload_id}")

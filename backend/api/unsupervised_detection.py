@@ -17,6 +17,7 @@ from backend.config.settings import (
 )
 from backend.utils.image_reader import ImageReader
 from backend.utils.resource_monitor import ResourceMonitor
+from backend.utils.file_path_manager import FilePathManager
 from backend.services.unsupervised_detection import UnsupervisedDiseaseDetectionService
 from backend.services.background_task_manager import get_task_manager
 from backend.models.database import UploadSession, get_db_manager
@@ -109,9 +110,9 @@ async def upload_detection_image(file: UploadFile = File(...)) -> Dict[str, Any]
                 detail=f"不支持的文件格式: {file_ext}，支持格式: {allowed_extensions}",
             )
 
-        # 保存上传的文件
-        upload_dir = Path(DETECTION_IMAGES_DIR)
-        upload_dir.mkdir(parents=True, exist_ok=True)
+        # 步骤7: 统一文件路径来源 - 使用 FilePathManager 获取检测影像目录
+        upload_dir = FilePathManager.get_detection_images_dir()
+        FilePathManager.ensure_directory_exists(upload_dir)
 
         file_path = upload_dir / file.filename
         with open(file_path, "wb") as f:

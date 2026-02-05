@@ -18,6 +18,7 @@ from backend.config.settings import (
 from backend.services.decompression import DecompressionService
 from backend.services.validation import ValidationService
 from backend.services.background_task_manager import get_task_manager
+from backend.utils.file_path_manager import FilePathManager
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +60,9 @@ async def upload_training_sample(file: UploadFile = File(...)) -> Dict[str, Any]
             )
 
         # 保存上传的文件
-        upload_path = UPLOAD_DIR / file.filename
-        upload_path.parent.mkdir(parents=True, exist_ok=True)
+        # 步骤7: 统一文件路径来源 - 使用 FilePathManager 获取上传目录
+        upload_path = FilePathManager.get_upload_dir() / file.filename
+        FilePathManager.ensure_directory_exists(upload_path.parent)
 
         with open(upload_path, "wb") as f:
             content = await file.read()
@@ -100,8 +102,9 @@ async def upload_training_sample(file: UploadFile = File(...)) -> Dict[str, Any]
 
         # 将验证通过的文件移动到训练样本目录
         sample_name = upload_path.stem
-        sample_dir = TRAINING_SAMPLES_DIR / sample_name
-        sample_dir.mkdir(parents=True, exist_ok=True)
+        # 步骤7: 统一文件路径来源 - 使用 FilePathManager 获取训练样本目录
+        sample_dir = FilePathManager.get_training_samples_dir() / sample_name
+        FilePathManager.ensure_directory_exists(sample_dir)
 
         # 复制文件到训练样本目录
         import shutil
@@ -173,8 +176,9 @@ async def upload_detection_images(file: UploadFile = File(...)) -> Dict[str, Any
         # 创建检测影像目录（使用时间戳作为目录名）
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        detection_dir = DETECTION_IMAGES_DIR / timestamp
-        detection_dir.mkdir(parents=True, exist_ok=True)
+        # 步骤7: 统一文件路径来源 - 使用 FilePathManager 获取检测影像目录
+        detection_dir = FilePathManager.get_detection_images_dir() / timestamp
+        FilePathManager.ensure_directory_exists(detection_dir)
 
         # 保存上传的文件
         file_path = detection_dir / file.filename
