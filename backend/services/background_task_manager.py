@@ -414,7 +414,11 @@ class BackgroundTaskManager:
 
             output_path = output_dir / fileName
 
-            logger.info(f"[MERGE_COMBINING] uploadId={uploadId}, outputPath={output_path}")
+            # 步骤4: 在合并逻辑中增加明确日志 - 开始合并
+            logger.info(
+                f"[MERGE_COMBINING_START] uploadId={uploadId}, outputPath={output_path}, "
+                f"totalChunks={totalChunks}"
+            )
 
             with open(output_path, "wb") as output_file:
                 for i in range(totalChunks):
@@ -437,9 +441,13 @@ class BackgroundTaskManager:
                     f"文件大小不匹配: 期望 {fileSize}, 实际 {actual_size}"
                 )
 
-            logger.info(f"[MERGE_COMBINING_COMPLETE] uploadId={uploadId}")
+            # 步骤4: 在合并逻辑中增加明确日志 - 合并完成
+            logger.info(
+                f"[MERGE_COMBINING_COMPLETE] uploadId={uploadId}, "
+                f"finalFilePath={output_path}, finalFileSize={actual_size}"
+            )
 
-            # 显式校验完整文件（第三步）
+            # 步骤5: 合并完成后显式校验文件
             logger.info(f"[FILE_VALIDATION_START] uploadId={uploadId}, filePath={output_path}")
 
             # 检查文件是否存在
@@ -476,11 +484,21 @@ class BackgroundTaskManager:
                 ).first()
 
                 if upload_session:
-                    upload_session.status = "completed"
+                    # 步骤2: 在后端维护每个文件的上传状态 - 更新为 merge_complete
+                    upload_session.status = "merge_complete"
                     upload_session.file_path = str(output_path)
                     upload_session.updated_at = datetime.now()
                     db_session.commit()
-                    logger.info(f"[SESSION_UPDATED] uploadId={uploadId}, status=completed")
+                    logger.info(
+                        f"[MERGE_COMPLETE_STATUS_SET] uploadId={uploadId}, "
+                        f"filePath={output_path}"
+                    )
+
+                    # 步骤2: 在后端维护每个文件的上传状态 - 更新为 completed
+                    upload_session.status = "completed"
+                    upload_session.updated_at = datetime.now()
+                    db_session.commit()
+                    logger.info(f"[FILE_READY_STATUS_SET] uploadId={uploadId}")
                 else:
                     logger.warning(f"[SESSION_NOT_FOUND] uploadId={uploadId}")
 
@@ -523,7 +541,7 @@ class BackgroundTaskManager:
                         upload_session.error_message = str(e)
                         upload_session.updated_at = datetime.now()
                         db_session.commit()
-                        logger.info(f"[SESSION_FAILED] uploadId={uploadId}")
+                        logger.info(f"[SESSION_FAILED] uploadId={uploadId}, error={str(e)}")
 
                 finally:
                     db_session.close()

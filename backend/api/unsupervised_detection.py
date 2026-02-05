@@ -5,7 +5,7 @@
 import logging
 import uuid
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 from fastapi import APIRouter, UploadFile, File, HTTPException, status, Query, BackgroundTasks
 from fastapi.responses import JSONResponse
 import numpy as np
@@ -19,6 +19,7 @@ from backend.utils.image_reader import ImageReader
 from backend.utils.resource_monitor import ResourceMonitor
 from backend.services.unsupervised_detection import UnsupervisedDiseaseDetectionService
 from backend.services.background_task_manager import get_task_manager
+from backend.models.database import UploadSession, get_db_manager
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,54 @@ router = APIRouter(prefix="/unsupervised", tags=["unsupervised_detection"])
 image_reader = ImageReader()
 detection_service = UnsupervisedDiseaseDetectionService()
 task_manager = get_task_manager()
+
+
+def check_file_readiness(file_path: str) -> Tuple[bool, str]:
+    """
+    步骤6: 在任何检测/分类逻辑开始前，强制检查文件状态是否为"已合并完成"
+
+    检查文件是否已就绪（来自完成的上传会话）
+
+    Args:
+        file_path: 文件路径
+
+    Returns:
+        (is_ready, error_message) - 如果就绪返回 (True, "")，否则返回 (False, 错误信息)
+    """
+    db_manager_instance = get_db_manager()
+    db_session = db_manager_instance.get_session()
+    try:
+        file_path_obj = Path(file_path)
+        file_name = file_path_obj.name
+
+        # 查询该文件是否有对应的上传会话
+        upload_session = db_session.query(UploadSession).filter(
+            UploadSession.file_name == file_name,
+            UploadSession.file_path == file_path
+        ).first()
+
+        if upload_session:
+            # 步骤6: 如果不是"completed"状态，立即返回错误，不进入计算流程
+            if upload_session.status != "completed":
+                error_msg = (
+                    f"文件未就绪: 上传会话状态为 '{upload_session.status}'，"
+                    f"必须为 'completed' 才能进行检测"
+                )
+                logger.warning(f"[FILE_READINESS_CHECK_FAILED] filePath={file_path}, status={upload_session.status}")
+                return False, error_msg
+
+            logger.info(f"[FILE_READINESS_CHECK_PASS] filePath={file_path}, uploadId={upload_session.upload_id}")
+            return True, ""
+        else:
+            # 如果没有上传会话记录，可能是直接上传的文件，允许处理
+            logger.info(f"[FILE_READINESS_CHECK_SKIP] filePath={file_path} (no upload session found)")
+            return True, ""
+
+    except Exception as e:
+        logger.error(f"[FILE_READINESS_CHECK_ERROR] filePath={file_path}, error={str(e)}")
+        return False, f"文件就绪检查失败: {str(e)}"
+    finally:
+        db_session.close()
 
 
 @router.post("/upload-image")
@@ -111,6 +160,15 @@ async def detect_disease(
     """
     try:
         logger.info(f"[API] 收到无监督检测请求: image_path={image_path}, n_clusters={n_clusters}, min_area={min_area}")
+
+        # 步骤6: 在任何检测/分类逻辑开始前，强制检查文件状态是否为"已合并完成"
+        is_ready, error_msg = check_file_readiness(image_path)
+        if not is_ready:
+            logger.error(f"[API] 文件就绪检查失败: {error_msg}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_msg,
+            )
 
         # 验证文件是否存在
         file_path = Path(image_path)

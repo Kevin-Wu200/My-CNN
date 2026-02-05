@@ -106,7 +106,8 @@ class UploadSession(Base):
     file_size = Column(Integer, nullable=False)
     total_chunks = Column(Integer, nullable=False)
     uploaded_chunks = Column(Text, nullable=False)  # JSON 序列化的已上传分片索引集合
-    status = Column(String(50), default="uploading")  # uploading, merging, completed, failed
+    # 状态值: uploading(接收chunk中) -> chunks_complete(所有chunk已接收) -> merging(合并中) -> merge_complete(合并完成) -> completed(文件就绪) -> failed
+    status = Column(String(50), default="uploading")
     file_path = Column(String(500), nullable=True)  # 合并完成后的文件路径
     error_message = Column(Text, nullable=True)  # 错误信息
     created_at = Column(DateTime, default=datetime.now, index=True)

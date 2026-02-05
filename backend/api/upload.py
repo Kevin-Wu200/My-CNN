@@ -14,6 +14,8 @@ from pydantic import BaseModel, field_validator
 import shutil
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
+from collections import defaultdict
+import time
 
 from backend.config.settings import (
     UPLOAD_DIR,
@@ -28,6 +30,30 @@ router = APIRouter(prefix="/upload", tags=["upload"])
 
 # 获取数据库管理器
 db_manager = get_db_manager()
+
+# 步骤7: 限制 /upload/chunk 的并发或频率
+# 使用简单的速率限制：每个 uploadId 在 1 秒内最多接收 10 个请求
+class RateLimiter:
+    """简单的速率限制器"""
+    def __init__(self, max_requests: int = 10, window_seconds: int = 1):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests: Dict[str, list] = defaultdict(list)
+
+    def is_allowed(self, key: str) -> bool:
+        """检查是否允许请求"""
+        now = time.time()
+        # 清理过期的请求记录
+        self.requests[key] = [req_time for req_time in self.requests[key]
+                              if now - req_time < self.window_seconds]
+
+        if len(self.requests[key]) >= self.max_requests:
+            return False
+
+        self.requests[key].append(now)
+        return True
+
+chunk_rate_limiter = RateLimiter(max_requests=10, window_seconds=1)
 
 
 class CompleteUploadRequest(BaseModel):
@@ -55,12 +81,13 @@ class CompleteUploadRequest(BaseModel):
 class UploadStatusResponse(BaseModel):
     """上传状态响应模型"""
     uploadId: str
-    status: str  # uploading, merging, completed, failed
+    status: str  # uploading, chunks_complete, merging, merge_complete, completed, failed
     progress: int  # 0-100
     uploadedChunks: int
     totalChunks: int
     filePath: Optional[str] = None
     errorMessage: Optional[str] = None
+    fileReady: bool = False  # 文件是否已就绪（仅当 status=completed 时为 True）
 
 
 @router.post("/chunk")
@@ -88,6 +115,16 @@ async def upload_chunk(
     """
     db_session = db_manager.get_session()
     try:
+        # 步骤7: 限制并发或频率
+        if not chunk_rate_limiter.is_allowed(uploadId):
+            logger.warning(
+                f"[RATE_LIMIT_EXCEEDED] uploadId={uploadId}, chunkIndex={chunkIndex}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="请求过于频繁，请稍后重试",
+            )
+
         # 验证参数
         if chunkIndex < 0 or chunkIndex >= totalChunks:
             raise HTTPException(
@@ -112,6 +149,7 @@ async def upload_chunk(
         with open(chunk_path, "wb") as f:
             f.write(chunk_content)
 
+        # 步骤8: 明确区分三类信息 - chunk 接收日志
         logger.info(
             f"[CHUNK_RECEIVED] uploadId={uploadId}, chunkIndex={chunkIndex}, "
             f"chunkSize={len(chunk_content)}, fileName={fileName}"
@@ -137,7 +175,8 @@ async def upload_chunk(
             )
             db_session.add(upload_session)
             logger.info(
-                f"[SESSION_CREATED] uploadId={uploadId}, totalChunks={totalChunks}"
+                f"[SESSION_CREATED] uploadId={uploadId}, totalChunks={totalChunks}, "
+                f"fileName={fileName}, fileSize={fileSize}"
             )
         else:
             # 更新现有会话
@@ -151,6 +190,7 @@ async def upload_chunk(
         uploaded_count = len(json.loads(upload_session.uploaded_chunks))
         progress = int((uploaded_count / totalChunks) * 100)
 
+        # 步骤8: 明确区分三类信息 - chunk 接收日志
         logger.info(
             f"[CHUNKS_UPDATED] uploadId={uploadId}, uploaded={uploaded_count}/{totalChunks}, "
             f"progress={progress}%"
@@ -169,7 +209,7 @@ async def upload_chunk(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"分片上传失败: {str(e)}")
+        logger.error(f"[CHUNK_UPLOAD_ERROR] uploadId={uploadId}, chunkIndex={chunkIndex}, error={str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"分片上传失败: {str(e)}",
@@ -227,6 +267,7 @@ async def complete_upload(
                 detail=f"上传会话不存在: {uploadId}",
             )
 
+        # 步骤3: 当且仅当所有 chunk 接收完成后，才触发合并逻辑
         # 验证所有分片是否已上传
         uploaded_chunks_set = set(json.loads(upload_session.uploaded_chunks))
         uploaded_count = len(uploaded_chunks_set)
@@ -254,14 +295,23 @@ async def complete_upload(
                 detail=f"分片索引不连续",
             )
 
-        logger.info(f"[ALL_CHUNKS_RECEIVED] uploadId={uploadId}")
+        # 步骤8: 明确区分三类信息 - chunk 接收完整日志
+        logger.info(f"[ALL_CHUNKS_RECEIVED] uploadId={uploadId}, totalChunks={totalChunks}")
 
-        # 更新会话状态为 "merging"
+        # 步骤2: 在后端维护每个文件的上传状态 - 更新为 chunks_complete
+        upload_session.status = "chunks_complete"
+        upload_session.updated_at = datetime.now()
+        db_session.commit()
+
+        logger.info(f"[CHUNKS_COMPLETE_STATUS_SET] uploadId={uploadId}")
+
+        # 步骤2: 在后端维护每个文件的上传状态 - 更新为 merging
         upload_session.status = "merging"
         upload_session.updated_at = datetime.now()
         db_session.commit()
 
-        logger.info(f"[MERGE_START] uploadId={uploadId}")
+        # 步骤8: 明确区分三类信息 - 文件合并日志
+        logger.info(f"[MERGE_START] uploadId={uploadId}, fileName={fileName}, fileSize={fileSize}")
 
         # 提交后台合并任务
         from backend.services.background_task_manager import get_task_manager
@@ -323,10 +373,14 @@ async def get_upload_status(uploadId: str) -> UploadStatusResponse:
         uploaded_count = len(uploaded_chunks_set)
         progress = int((uploaded_count / upload_session.total_chunks) * 100)
 
+        # 步骤8: 明确区分三类信息 - 状态查询日志
         logger.info(
             f"[STATUS_QUERY] uploadId={uploadId}, status={upload_session.status}, "
-            f"progress={progress}%"
+            f"progress={progress}%, uploadedChunks={uploaded_count}/{upload_session.total_chunks}"
         )
+
+        # 文件就绪的条件：状态为 completed
+        file_ready = upload_session.status == "completed"
 
         return UploadStatusResponse(
             uploadId=uploadId,
@@ -336,6 +390,7 @@ async def get_upload_status(uploadId: str) -> UploadStatusResponse:
             totalChunks=upload_session.total_chunks,
             filePath=upload_session.file_path,
             errorMessage=upload_session.error_message,
+            fileReady=file_ready,
         )
 
     except HTTPException:
