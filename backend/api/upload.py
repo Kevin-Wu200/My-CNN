@@ -33,10 +33,11 @@ router = APIRouter(prefix="/upload", tags=["upload"])
 db_manager = get_db_manager()
 
 # 步骤7: 限制 /upload/chunk 的并发或频率
-# 使用简单的速率限制：每个 uploadId 在 1 秒内最多接收 10 个请求
+# 使用简单的速率限制：每个 uploadId 在 1 秒内最多接收 100 个请求
+# 注意：前端使用8个并行worker上传，所以需要足够大的限制值
 class RateLimiter:
     """简单的速率限制器"""
-    def __init__(self, max_requests: int = 10, window_seconds: int = 1):
+    def __init__(self, max_requests: int = 100, window_seconds: int = 1):
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self.requests: Dict[str, list] = defaultdict(list)
@@ -49,12 +50,16 @@ class RateLimiter:
                               if now - req_time < self.window_seconds]
 
         if len(self.requests[key]) >= self.max_requests:
+            logger.warning(
+                f"[RATE_LIMIT_WARNING] uploadId={key}, "
+                f"requests={len(self.requests[key])}, max={self.max_requests}"
+            )
             return False
 
         self.requests[key].append(now)
         return True
 
-chunk_rate_limiter = RateLimiter(max_requests=10, window_seconds=1)
+chunk_rate_limiter = RateLimiter(max_requests=100, window_seconds=1)
 
 
 class CompleteUploadRequest(BaseModel):
