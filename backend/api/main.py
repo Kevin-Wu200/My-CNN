@@ -87,6 +87,11 @@ class GracefulShutdownManager:
         """
         处理关闭信号（SIGINT/SIGTERM）
 
+        关键保证：
+        - 不会强制退出主进程
+        - 只标记关闭标志，让 uvicorn 自然关闭
+        - 任何异常都被捕获并记录，不会导致服务崩溃
+
         Args:
             signum: 信号编号
             frame: 当前栈帧
@@ -131,11 +136,9 @@ class GracefulShutdownManager:
 
         except Exception as e:
             logger.error(f"关闭过程中发生错误: {str(e)}", exc_info=True)
-
-        finally:
-            # 安全退出主进程
-            logger.info("主进程即将退出...")
-            sys.exit(0)
+            # 关键：不在 finally 中调用 sys.exit()
+            # 让 uvicorn 自然处理关闭流程
+            logger.warning("关闭流程异常，但不强制退出主进程")
 
     def _stop_new_tasks(self) -> None:
         """停止新任务创建"""
@@ -406,7 +409,8 @@ if __name__ == "__main__":
             timeout_notify=43200,  # 12小时 shutdown 通知超时
         )
     except KeyboardInterrupt:
-        logger.info("捕获到 KeyboardInterrupt")
+        logger.info("捕获到 KeyboardInterrupt，服务正在关闭...")
     except Exception as e:
         logger.error(f"服务启动失败: {str(e)}", exc_info=True)
-        sys.exit(1)
+        # 关键：不调用 sys.exit(1)，让进程自然退出
+        # 这样可以确保任何清理代码都有机会执行
