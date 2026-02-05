@@ -3,6 +3,7 @@
 """
 
 import logging
+import uuid
 from pathlib import Path
 from typing import Dict, Any
 from fastapi import APIRouter, UploadFile, File, HTTPException, status, Query, BackgroundTasks
@@ -92,7 +93,7 @@ async def detect_disease(
     image_path: str = Query(..., description="影像文件路径"),
     n_clusters: int = Query(4, ge=2, le=10, description="K-means 聚类类别数"),
     min_area: int = Query(50, ge=10, description="最小斑块面积阈值"),
-    background_tasks: BackgroundTasks = None,
+    background_tasks: BackgroundTasks,
 ) -> Dict[str, Any]:
     """
     启动无监督病害木检测任务（异步）
@@ -117,20 +118,19 @@ async def detect_disease(
                 detail=f"影像文件不存在: {image_path}",
             )
 
-        # 创建任务
-        task_id = task_manager.create_task("unsupervised_detection")
+        # 预创建任务ID（用于返回给客户端）
+        task_id = str(uuid.uuid4())
 
-        # 启动后台任务
-        if background_tasks:
-            background_tasks.add_task(
-                _run_unsupervised_detection,
-                task_id,
-                str(file_path),
-                n_clusters,
-                min_area,
-            )
+        # 启动后台任务（任务创建移到后台函数内部）
+        background_tasks.add_task(
+            _run_unsupervised_detection_safe,
+            task_id,
+            str(file_path),
+            n_clusters,
+            min_area,
+        )
 
-        logger.info(f"无监督检测任务已启动: {task_id}")
+        logger.info(f"无监督检测任务已提交: {task_id}")
 
         return {
             "status": "started",
@@ -169,6 +169,41 @@ async def get_detection_task_status(task_id: str) -> Dict[str, Any]:
     return task
 
 
+def _run_unsupervised_detection_safe(
+    task_id: str, image_path: str, n_clusters: int, min_area: int
+) -> None:
+    """
+    安全包装器：确保任务创建和异常处理
+
+    Args:
+        task_id: 任务ID
+        image_path: 影像文件路径
+        n_clusters: K-means 聚类类别数
+        min_area: 最小斑块面积阈值
+    """
+    try:
+        # 在后台线程中创建任务，使用指定的 task_id（确保任务ID一致）
+        task_manager.create_task("unsupervised_detection", task_id=task_id)
+
+        # 立即标记为运行中
+        task_manager.start_task(task_id)
+
+        # 执行实际任务
+        _run_unsupervised_detection(task_id, image_path, n_clusters, min_area)
+
+    except Exception as e:
+        # 捕获所有异常，确保任务状态被正确更新
+        logger.error(f"[{task_id}] 任务执行异常: {str(e)}", exc_info=True)
+
+        # 如果任务已创建，标记为失败
+        if task_id in task_manager.tasks:
+            task_manager.fail_task(task_id, f"任务执行异常: {str(e)}")
+        else:
+            # 如果任务未创建，创建并标记为失败
+            task_manager.create_task("unsupervised_detection", task_id=task_id)
+            task_manager.fail_task(task_id, f"任务初始化失败: {str(e)}")
+
+
 def _run_unsupervised_detection(
     task_id: str, image_path: str, n_clusters: int, min_area: int
 ) -> None:
@@ -186,9 +221,8 @@ def _run_unsupervised_detection(
         logger.info(f"[{task_id}] 后台任务已启动")
         ResourceMonitor.log_resource_status(f"后台任务启动 [{task_id}]")
 
-        task_manager.start_task(task_id)
         task_manager.update_progress(task_id, 10, "读取影像中")
-        logger.info(f"[{task_id}] 任务已启动，开始读取影像")
+        logger.info(f"[{task_id}] 开始读取影像")
 
         # 读取影像
         logger.debug(f"[{task_id}] 读取影像: {image_path}")

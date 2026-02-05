@@ -10,6 +10,7 @@ import logging
 import signal
 import sys
 import time
+import os
 import multiprocessing as mp
 from typing import Optional
 
@@ -22,6 +23,9 @@ from backend.utils.logger import LoggerSetup
 from backend.utils.thread_limiter import limit_numerical_library_threads, log_thread_configuration
 from backend.config.settings import NUMERICAL_LIBRARY_THREADS
 from backend.services.background_task_manager import get_task_manager, TaskStatus
+
+# Development mode flag - only enable reload in development
+DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
 
 # 初始化日志
 logger = LoggerSetup.setup_logger(__name__)
@@ -257,6 +261,14 @@ class GracefulShutdownManager:
         try:
             logger.info("执行资源清理...")
 
+            # 关闭任务管理器，等待活动线程
+            try:
+                logger.info("关闭任务管理器...")
+                self.task_manager.shutdown(timeout=30)
+                logger.info("任务管理器已关闭")
+            except Exception as e:
+                logger.warning(f"关闭任务管理器失败: {str(e)}")
+
             # 清理旧任务
             try:
                 removed_count = self.task_manager.cleanup_old_tasks(max_age_hours=24)
@@ -325,6 +337,19 @@ async def shutdown_event():
     """应用关闭事件"""
     logger.info("FastAPI 应用关闭事件触发")
 
+    # 如果不是通过信号触发的关闭，执行清理
+    if not shutdown_manager.is_shutdown_in_progress():
+        logger.info("通过 FastAPI 事件触发关闭流程")
+        shutdown_manager.set_shutdown_flag()
+
+        try:
+            # 执行清理步骤
+            shutdown_manager._terminate_running_tasks()
+            shutdown_manager._wait_for_child_processes()
+            shutdown_manager._cleanup_resources()
+        except Exception as e:
+            logger.error(f"关闭清理失败: {str(e)}", exc_info=True)
+
 
 # 健康检查端点
 @app.get("/health")
@@ -370,7 +395,7 @@ if __name__ == "__main__":
             "backend.api.main:app",
             host="0.0.0.0",
             port=8000,
-            reload=True,
+            reload=DEV_MODE,
             timeout_keep_alive=43200,  # 12小时 keep-alive 超时
             timeout_notify=43200,  # 12小时 shutdown 通知超时
         )

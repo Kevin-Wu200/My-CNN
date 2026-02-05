@@ -13,6 +13,8 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
+from backend.models.task_storage import TaskStorage
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,6 +24,7 @@ class TaskStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class BackgroundTaskManager:
@@ -31,19 +34,43 @@ class BackgroundTaskManager:
         """初始化任务管理器"""
         self.tasks: Dict[str, Dict[str, Any]] = {}
         self.progress_timestamps: Dict[str, float] = {}  # 记录进度最后更新时间
+        self.active_threads: Dict[str, threading.Thread] = {}  # 跟踪活动线程
+        self._shutdown_flag = threading.Event()  # 关闭协调标志
+        # 初始化持久化存储
+        self.storage = TaskStorage()
 
-    def create_task(self, task_type: str, user_id: Optional[str] = None) -> str:
+        # 从存储加载任务
+        self._load_tasks_from_storage()
+
+    def _load_tasks_from_storage(self) -> None:
+        """从持久化存储加载任务"""
+        try:
+            stored_tasks = self.storage.load_all_tasks()
+            self.tasks.update(stored_tasks)
+            logger.info(f"从存储加载了 {len(stored_tasks)} 个任务")
+
+            # 将运行中的任务标记为失败（进程重启导致）
+            for task_id, task in self.tasks.items():
+                if task["status"] == TaskStatus.RUNNING:
+                    logger.warning(f"任务 {task_id} 在重启前处于运行状态，标记为失败")
+                    self.fail_task(task_id, "服务器重启，任务被中断")
+        except Exception as e:
+            logger.error(f"加载任务失败: {str(e)}")
+
+    def create_task(self, task_type: str, user_id: Optional[str] = None, task_id: Optional[str] = None) -> str:
         """
         创建新任务
 
         Args:
             task_type: 任务类型（unsupervised_detection, detection, training等）
             user_id: 用户ID（可选）
+            task_id: 任务ID（可选，如果不提供则自动生成）
 
         Returns:
             任务ID
         """
-        task_id = str(uuid.uuid4())
+        if task_id is None:
+            task_id = str(uuid.uuid4())
         task = {
             "task_id": task_id,
             "task_type": task_type,
@@ -59,6 +86,8 @@ class BackgroundTaskManager:
         }
         self.tasks[task_id] = task
         logger.info(f"创建任务: {task_id} (类型: {task_type})")
+        # 持久化任务
+        self.storage.save_task(task)
         return task_id
 
     def start_task(self, task_id: str) -> bool:
@@ -78,6 +107,8 @@ class BackgroundTaskManager:
         self.tasks[task_id]["status"] = TaskStatus.RUNNING
         self.tasks[task_id]["started_at"] = datetime.now().isoformat()
         logger.info(f"任务已启动: {task_id}")
+        # 持久化任务
+        self.storage.save_task(self.tasks[task_id])
         return True
 
     def update_progress(
@@ -104,6 +135,8 @@ class BackgroundTaskManager:
 
         # 记录进度更新时间戳，用于检测进度是否卡住
         self.progress_timestamps[task_id] = datetime.now().timestamp()
+        # 持久化任务
+        self.storage.save_task(self.tasks[task_id])
         return True
 
     def complete_task(self, task_id: str, result: Any = None) -> bool:
@@ -126,6 +159,8 @@ class BackgroundTaskManager:
         self.tasks[task_id]["completed_at"] = datetime.now().isoformat()
         self.tasks[task_id]["result"] = result
         logger.info(f"任务已完成: {task_id}")
+        # 持久化任务
+        self.storage.save_task(self.tasks[task_id])
         return True
 
     def fail_task(self, task_id: str, error: str) -> bool:
@@ -147,6 +182,31 @@ class BackgroundTaskManager:
         self.tasks[task_id]["completed_at"] = datetime.now().isoformat()
         self.tasks[task_id]["error"] = error
         logger.error(f"任务失败: {task_id} - {error}")
+        # 持久化任务
+        self.storage.save_task(self.tasks[task_id])
+        return True
+
+    def cancel_task(self, task_id: str, reason: str = "用户取消") -> bool:
+        """
+        标记任务为已取消
+
+        Args:
+            task_id: 任务ID
+            reason: 取消原因
+
+        Returns:
+            是否成功
+        """
+        if task_id not in self.tasks:
+            logger.warning(f"任务不存在: {task_id}")
+            return False
+
+        self.tasks[task_id]["status"] = TaskStatus.CANCELLED
+        self.tasks[task_id]["completed_at"] = datetime.now().isoformat()
+        self.tasks[task_id]["error"] = reason
+        logger.info(f"任务已取消: {task_id} - {reason}")
+        # 持久化任务
+        self.storage.save_task(self.tasks[task_id])
         return True
 
     def get_task_status(self, task_id: str, stuck_threshold: int = 30) -> Optional[Dict[str, Any]]:
@@ -244,7 +304,7 @@ class BackgroundTaskManager:
         tasks_to_remove = []
 
         for task_id, task in self.tasks.items():
-            if task["status"] in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
+            if task["status"] in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
                 completed_at = datetime.fromisoformat(task["completed_at"])
                 if now - completed_at > timedelta(hours=max_age_hours):
                     tasks_to_remove.append(task_id)
@@ -282,15 +342,43 @@ class BackgroundTaskManager:
 
         # 在后台线程中执行合并
         merge_thread = threading.Thread(
-            target=self._execute_merge_task,
+            target=self._execute_merge_task_wrapper,
             args=(task_id, uploadId, fileName, fileSize, totalChunks),
-            daemon=True,
+            daemon=False,
+            name=f"MergeThread-{task_id}"
         )
+        self.active_threads[task_id] = merge_thread
         merge_thread.start()
 
         logger.info(f"[MERGE_THREAD_STARTED] taskId={task_id}, uploadId={uploadId}")
 
         return task_id
+
+    def _execute_merge_task_wrapper(
+        self,
+        task_id: str,
+        uploadId: str,
+        fileName: str,
+        fileSize: int,
+        totalChunks: int,
+    ) -> None:
+        """
+        包装器：执行合并任务并清理线程跟踪
+
+        Args:
+            task_id: 任务 ID
+            uploadId: 上传会话 ID
+            fileName: 文件名
+            fileSize: 文件大小
+            totalChunks: 总分片数
+        """
+        try:
+            self._execute_merge_task(task_id, uploadId, fileName, fileSize, totalChunks)
+        finally:
+            # 清理线程跟踪
+            if task_id in self.active_threads:
+                del self.active_threads[task_id]
+            logger.info(f"[THREAD_CLEANUP] taskId={task_id}")
 
     def _execute_merge_task(
         self,
@@ -420,6 +508,26 @@ class BackgroundTaskManager:
 
             # 标记任务失败
             self.fail_task(task_id, str(e))
+
+    def shutdown(self, timeout: int = 60) -> None:
+        """
+        关闭任务管理器，等待所有活动线程完成
+
+        Args:
+            timeout: 等待超时时间（秒）
+        """
+        logger.info(f"开始关闭任务管理器，活动线程数: {len(self.active_threads)}")
+        self._shutdown_flag.set()
+
+        # 等待所有线程完成
+        for task_id, thread in list(self.active_threads.items()):
+            if thread.is_alive():
+                logger.info(f"等待线程完成: {thread.name}")
+                thread.join(timeout=timeout)
+                if thread.is_alive():
+                    logger.warning(f"线程未在超时内完成: {thread.name}")
+
+        logger.info("任务管理器关闭完成")
 
 
 # 全局任务管理器实例

@@ -222,13 +222,35 @@ class UploadManager {
 
     console.log(`[UploadManager] 启动后端状态轮询 [${uploadId}]`)
 
+    let consecutiveErrors = 0
+    const MAX_CONSECUTIVE_ERRORS = 3
+
     session.pollInterval = setInterval(async () => {
       try {
         const response = await fetch(`/api/upload/status/${uploadId}`)
         if (!response.ok) {
-          console.warn(`[UploadManager] 查询状态失败: ${response.status}`)
+          consecutiveErrors++
+          console.warn(`[UploadManager] 查询状态失败: ${response.status} (连续错误: ${consecutiveErrors})`)
+
+          // 连续错误超过阈值，停止轮询
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            console.error(`[UploadManager] 后端不可达，停止轮询 [${uploadId}]`)
+            if (session.pollInterval) {
+              clearInterval(session.pollInterval)
+              session.pollInterval = undefined
+            }
+            session.status = 'failed'
+            session.callbacks.onError?.({
+              code: 'BACKEND_UNREACHABLE',
+              message: '后端服务不可达，上传已中止',
+            })
+            this.sessions.delete(uploadId)
+          }
           return
         }
+
+        // 成功响应，重置错误计数
+        consecutiveErrors = 0
 
         const status = await response.json()
 
@@ -281,7 +303,23 @@ class UploadManager {
           this.sessions.delete(uploadId)
         }
       } catch (error) {
-        console.error(`[UploadManager] 轮询状态异常 [${uploadId}]:`, error)
+        consecutiveErrors++
+        console.error(`[UploadManager] 轮询状态异常 [${uploadId}]:`, error, `(连续错误: ${consecutiveErrors})`)
+
+        // 连续错误超过阈值，停止轮询
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+          console.error(`[UploadManager] 轮询异常过多，停止轮询 [${uploadId}]`)
+          if (session.pollInterval) {
+            clearInterval(session.pollInterval)
+            session.pollInterval = undefined
+          }
+          session.status = 'failed'
+          session.callbacks.onError?.({
+            code: 'POLLING_ERROR',
+            message: '轮询异常，上传已中止',
+          })
+          this.sessions.delete(uploadId)
+        }
       }
     }, 5000)
   }

@@ -13,6 +13,11 @@ import type { EnhancedTask } from '@/types'
 // 轮询间隔（毫秒）
 const POLL_INTERVAL = 10000
 
+// 重试配置
+const MAX_RETRIES = 3
+const INITIAL_RETRY_DELAY = 2000  // 2秒
+const MAX_RETRY_DELAY = 30000     // 30秒
+
 // 后端API基础URL
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -49,6 +54,8 @@ interface PollerConfig {
 class ProgressPoller {
   private pollers = new Map<string, NodeJS.Timeout>()
   private activePolls = new Set<string>()
+  private retryCount = new Map<string, number>()
+  private retryTimeouts = new Map<string, NodeJS.Timeout>()
 
   /**
    * 启动轮询
@@ -106,10 +113,18 @@ class ProgressPoller {
           onFinish?.()
           return
         }
-        throw new Error(`HTTP ${response.status}`)
+        // 后端不可达（5xx 错误或连接失败），停止轮询
+        console.error(`[ProgressPoller] 后端不可达: ${taskId} (HTTP ${response.status})`)
+        onError?.(`后端服务不可达 (HTTP ${response.status})`)
+        this.stopPolling(taskId)
+        onFinish?.()
+        return
       }
 
       const backendTask: BackendTaskStatus = await response.json()
+
+      // 重置重试计数（成功获取响应）
+      this.retryCount.set(taskId, 0)
 
       console.log(`[ProgressPoller] 收到后端进度: ${taskId}`, {
         progress: backendTask.progress,
@@ -129,12 +144,42 @@ class ProgressPoller {
         // 任务失败
         onError?.(backendTask.error || '任务失败')
         this.stopPolling(taskId)
+      } else if (backendTask.status === 'cancelled') {
+        // 任务已取消
+        onError?.(backendTask.error || '任务已被取消')
+        this.stopPolling(taskId)
       }
 
       onFinish?.()
     } catch (error) {
-      console.error(`[ProgressPoller] 轮询失败: ${taskId}`, error)
-      // 轮询失败不停止，继续尝试
+      console.error(`[ProgressPoller] 轮询异常: ${taskId}`, error)
+
+      const currentRetries = this.retryCount.get(taskId) || 0
+
+      if (currentRetries < MAX_RETRIES) {
+        const retryDelay = Math.min(
+          INITIAL_RETRY_DELAY * Math.pow(2, currentRetries),
+          MAX_RETRY_DELAY
+        )
+
+        this.retryCount.set(taskId, currentRetries + 1)
+
+        console.log(
+          `[ProgressPoller] 将在 ${retryDelay}ms 后重试 (${currentRetries + 1}/${MAX_RETRIES}): ${taskId}`
+        )
+
+        const retryTimeout = setTimeout(() => {
+          this.pollOnce(taskId, onProgress, onComplete, onError, onFinish)
+          this.retryTimeouts.delete(taskId)
+        }, retryDelay)
+
+        this.retryTimeouts.set(taskId, retryTimeout)
+      } else {
+        console.error(`[ProgressPoller] 达到最大重试次数，停止轮询: ${taskId}`)
+        onError?.(`轮询失败: ${error instanceof Error ? error.message : '未知错误'}（已重试${MAX_RETRIES}次）`)
+        this.stopPolling(taskId)
+      }
+
       onFinish?.()
     }
   }
@@ -150,6 +195,13 @@ class ProgressPoller {
         clearInterval(pollerId)
         this.pollers.delete(taskId)
       }
+
+      const retryTimeout = this.retryTimeouts.get(taskId)
+      if (retryTimeout) {
+        clearTimeout(retryTimeout)
+        this.retryTimeouts.delete(taskId)
+      }
+      this.retryCount.delete(taskId)
       this.activePolls.delete(taskId)
     }
   }

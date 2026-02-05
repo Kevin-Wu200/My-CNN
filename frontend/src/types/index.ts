@@ -7,7 +7,7 @@ export interface ApiResponse<T = any> {
 export interface TrainingTask {
   id: string
   name: string
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
   createdAt: string
   updatedAt: string
 }
@@ -15,7 +15,7 @@ export interface TrainingTask {
 export interface DetectionTask {
   id: string
   name: string
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
   createdAt: string
   updatedAt: string
 }
@@ -50,7 +50,7 @@ export type InterruptType =
   | 'backend_timeout'
   | 'backend_manual_abort'
 
-export type TaskStatus = 'idle' | 'running' | 'completed' | 'failed' | 'frontend_interrupted'
+export type TaskStatus = 'idle' | 'running' | 'completed' | 'failed' | 'cancelled' | 'frontend_interrupted'
 
 /**
  * 增强的任务状态数据结构
