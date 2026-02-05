@@ -5,6 +5,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # 项目根目录
@@ -27,6 +28,10 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+log_debug() {
+    echo -e "${CYAN}[DEBUG]${NC} $1"
+}
+
 # 清理函数 - 仅在用户主动 Ctrl+C 时触发
 cleanup() {
     log_info "正在清理进程..."
@@ -39,6 +44,26 @@ cleanup() {
 
 # 设置退出陷阱 - 仅响应 INT (Ctrl+C)
 trap cleanup INT
+
+# 显示帮助信息
+show_help() {
+    echo ""
+    echo -e "${BLUE}使用方法:${NC}"
+    echo "  ./start.sh [选项]"
+    echo ""
+    echo -e "${BLUE}选项:${NC}"
+    echo "  --verify              运行架构验证"
+    echo "  --test                运行基础测试"
+    echo "  --test-advanced       运行高级测试"
+    echo "  --check-logs          检查日志验证"
+    echo "  --help                显示此帮助信息"
+    echo ""
+    echo -e "${BLUE}示例:${NC}"
+    echo "  ./start.sh                    # 启动服务"
+    echo "  ./start.sh --verify           # 启动服务并验证"
+    echo "  ./start.sh --test             # 运行基础测试"
+    echo ""
+}
 
 # 启用 set -e 用于前期检查
 set -e
@@ -76,20 +101,47 @@ ensure_directories()
 print("✅ 存储目录初始化完成")
 EOF
 
-# 可选：运行验证脚本
-if [ "$1" == "--verify" ]; then
-    log_info "运行架构验证..."
-    python verify_implementation.py
-    if [ $? -ne 0 ]; then
-        log_error "验证失败，请检查上述错误"
-        exit 1
-    fi
-fi
+# 处理命令行参数
+case "$1" in
+    --help)
+        show_help
+        exit 0
+        ;;
+    --verify)
+        log_info "运行架构验证..."
+        python verify_implementation.py
+        if [ $? -ne 0 ]; then
+            log_error "验证失败，请检查上述错误"
+            exit 1
+        fi
+        ;;
+    --test)
+        log_info "运行基础测试..."
+        python3 test_upload_implementation.py
+        exit $?
+        ;;
+    --test-advanced)
+        log_info "运行高级测试..."
+        python3 test_advanced_scenarios.py
+        exit $?
+        ;;
+    --check-logs)
+        log_info "启动后端服务用于日志验证..."
+        log_info "后端地址: http://localhost:8000"
+        log_info "API 文档: http://localhost:8000/docs"
+        uvicorn backend.api.main:app \
+            --host 0.0.0.0 \
+            --port 8000 \
+            --timeout-keep-alive 43200
+        exit $?
+        ;;
+esac
 
 # 启动后端服务
 log_info "启动后端服务..."
 log_info "后端地址: http://localhost:8000"
 log_info "API 文档: http://localhost:8000/docs"
+log_debug "启动命令: uvicorn backend.api.main:app --host 0.0.0.0 --port 8000"
 uvicorn backend.api.main:app \
     --host 0.0.0.0 \
     --port 8000 \
@@ -98,13 +150,16 @@ BACKEND_PID=$!
 log_success "后端服务已启动 (PID: $BACKEND_PID)"
 
 # 等待后端启动
-sleep 2
+sleep 3
 
 # 检查后端是否成功启动
 if ! kill -0 $BACKEND_PID 2>/dev/null; then
     log_error "后端启动失败"
+    log_error "请检查日志: tail -f backend.log"
     exit 1
 fi
+
+log_success "后端服务健康检查通过"
 
 # 关闭 set -e，防止后续命令失败导致脚本退出
 # 这确保了即使前端启动失败，后端服务也会继续运行
@@ -133,9 +188,9 @@ if [ ! -z "$FRONTEND_PID" ]; then
     log_success "前端服务已启动！"
 fi
 echo ""
-echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  遥感影像病害木检测系统${NC}"
-echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
+echo -e "${BLUE}╔════════════════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║${NC}     遥感影像病害木检测系统 - 分片上传8步完整修复     ${BLUE}║${NC}"
+echo -e "${BLUE}╚════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "  ${BLUE}前端地址:${NC}     http://localhost:5173"
 echo -e "  ${BLUE}后端地址:${NC}     http://localhost:8000"
@@ -147,9 +202,25 @@ if [ ! -z "$FRONTEND_PID" ]; then
     echo -e "  ${BLUE}前端进程:${NC}     $FRONTEND_PID"
 fi
 echo ""
+echo -e "${CYAN}📚 文档和测试:${NC}"
+echo -e "  ${CYAN}快速导航:${NC}     README_PROJECT_COMPLETION.md"
+echo -e "  ${CYAN}技术文档:${NC}     IMPLEMENTATION_SUMMARY.md"
+echo -e "  ${CYAN}测试报告:${NC}     COMPREHENSIVE_TEST_REPORT.md"
+echo -e "  ${CYAN}中文总结:${NC}     FINAL_CHINESE_SUMMARY.md"
+echo ""
+echo -e "${CYAN}🧪 运行测试:${NC}"
+echo -e "  ${CYAN}基础测试:${NC}     python3 test_upload_implementation.py"
+echo -e "  ${CYAN}高级测试:${NC}     python3 test_advanced_scenarios.py"
+echo ""
+echo -e "${CYAN}📊 查看日志:${NC}"
+echo -e "  ${CYAN}实时日志:${NC}     tail -f backend.log"
+echo -e "  ${CYAN}特定标签:${NC}     grep 'CHUNK_RECEIVED' backend.log"
+echo ""
 echo -e "  ${YELLOW}按 Ctrl+C 停止前端服务（后端继续运行）${NC}"
 echo ""
-echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
+echo -e "${BLUE}╔════════════════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║${NC}  ✅ 系统已准备好投入生产使用！                      ${BLUE}║${NC}"
+echo -e "${BLUE}╚════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
 # 等待前端进程（如果存在）
