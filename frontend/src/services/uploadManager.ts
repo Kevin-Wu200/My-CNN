@@ -6,6 +6,7 @@
  * 2. 启动文件上传任务
  * 3. 监听上传进度和完成事件
  * 4. 提供上传状态查询接口
+ * 5. 轮询后端上传状态
  */
 
 interface UploadProgressCallback {
@@ -35,6 +36,7 @@ interface UploadSession {
   uploadedChunks: number
   totalChunks: number
   callbacks: UploadCallbacks
+  pollInterval?: NodeJS.Timeout
 }
 
 class UploadManager {
@@ -125,8 +127,15 @@ class UploadManager {
     session.status = 'completed'
     session.progress = 100
 
-    console.log(`[UploadManager] 上传完成 [${session.uploadId}]:`, message.result)
+    console.log(`[UploadManager] 分片上传完成 [${session.uploadId}]:`, message.result)
 
+    // 停止轮询
+    if (session.pollInterval) {
+      clearInterval(session.pollInterval)
+      session.pollInterval = undefined
+    }
+
+    // 调用完成回调
     session.callbacks.onComplete?.(message.result)
 
     // 延迟清理会话
@@ -146,6 +155,12 @@ class UploadManager {
       errorMessage: message.errorMessage,
       failedChunkIndex: message.failedChunkIndex,
     })
+
+    // 停止轮询
+    if (session.pollInterval) {
+      clearInterval(session.pollInterval)
+      session.pollInterval = undefined
+    }
 
     session.callbacks.onError?.({
       code: message.errorCode,
@@ -192,7 +207,83 @@ class UploadManager {
       data: { file },
     })
 
+    // 启动后端状态轮询（每 5 秒查询一次）
+    this.startStatusPolling(uploadId)
+
     return uploadId
+  }
+
+  /**
+   * 启动后端状态轮询
+   */
+  private startStatusPolling(uploadId: string) {
+    const session = this.sessions.get(uploadId)
+    if (!session) return
+
+    console.log(`[UploadManager] 启动后端状态轮询 [${uploadId}]`)
+
+    session.pollInterval = setInterval(async () => {
+      try {
+        const response = await fetch(`/api/upload/status/${uploadId}`)
+        if (!response.ok) {
+          console.warn(`[UploadManager] 查询状态失败: ${response.status}`)
+          return
+        }
+
+        const status = await response.json()
+
+        console.log(`[UploadManager] 后端状态 [${uploadId}]:`, {
+          status: status.status,
+          progress: status.progress,
+          uploadedChunks: status.uploadedChunks,
+          totalChunks: status.totalChunks,
+        })
+
+        // 更新会话状态
+        session.progress = status.progress
+        session.uploadedChunks = status.uploadedChunks
+        session.totalChunks = status.totalChunks
+
+        // 如果后端状态为 completed，调用完成回调
+        if (status.status === 'completed' && status.filePath) {
+          console.log(`[UploadManager] 后端合并完成 [${uploadId}]:`, status.filePath)
+
+          if (session.pollInterval) {
+            clearInterval(session.pollInterval)
+            session.pollInterval = undefined
+          }
+
+          session.status = 'completed'
+          session.callbacks.onComplete?.({
+            filePath: status.filePath,
+            fileName: session.fileName,
+            fileSize: session.fileSize,
+            totalChunks: session.totalChunks,
+          })
+
+          this.sessions.delete(uploadId)
+        }
+        // 如果后端状态为 failed，调用错误回调
+        else if (status.status === 'failed') {
+          console.error(`[UploadManager] 后端合并失败 [${uploadId}]:`, status.errorMessage)
+
+          if (session.pollInterval) {
+            clearInterval(session.pollInterval)
+            session.pollInterval = undefined
+          }
+
+          session.status = 'failed'
+          session.callbacks.onError?.({
+            code: 'BACKEND_MERGE_FAILED',
+            message: status.errorMessage || '后端合并失败',
+          })
+
+          this.sessions.delete(uploadId)
+        }
+      } catch (error) {
+        console.error(`[UploadManager] 轮询状态异常 [${uploadId}]:`, error)
+      }
+    }, 5000)
   }
 
   /**
@@ -217,8 +308,15 @@ class UploadManager {
       this.worker.terminate()
       this.worker = null
     }
+    // 清理所有轮询
+    this.sessions.forEach((session) => {
+      if (session.pollInterval) {
+        clearInterval(session.pollInterval)
+      }
+    })
     this.sessions.clear()
   }
 }
 
 export const uploadManager = UploadManager.getInstance()
+

@@ -5,9 +5,13 @@
 
 import uuid
 import logging
+import threading
+import shutil
+import json
 from typing import Dict, Any, Optional, Callable
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +257,169 @@ class BackgroundTaskManager:
             logger.info(f"清理了 {removed_count} 个旧任务")
 
         return removed_count
+
+    def submit_merge_task(
+        self,
+        uploadId: str,
+        fileName: str,
+        fileSize: int,
+        totalChunks: int,
+    ) -> str:
+        """
+        提交文件合并任务
+
+        Args:
+            uploadId: 上传会话 ID
+            fileName: 文件名
+            fileSize: 文件大小
+            totalChunks: 总分片数
+
+        Returns:
+            任务 ID
+        """
+        task_id = self.create_task(task_type="file_merge")
+        self.start_task(task_id)
+
+        # 在后台线程中执行合并
+        merge_thread = threading.Thread(
+            target=self._execute_merge_task,
+            args=(task_id, uploadId, fileName, fileSize, totalChunks),
+            daemon=True,
+        )
+        merge_thread.start()
+
+        logger.info(f"[MERGE_THREAD_STARTED] taskId={task_id}, uploadId={uploadId}")
+
+        return task_id
+
+    def _execute_merge_task(
+        self,
+        task_id: str,
+        uploadId: str,
+        fileName: str,
+        fileSize: int,
+        totalChunks: int,
+    ) -> None:
+        """
+        执行文件合并任务（在后台线程中运行）
+
+        Args:
+            task_id: 任务 ID
+            uploadId: 上传会话 ID
+            fileName: 文件名
+            fileSize: 文件大小
+            totalChunks: 总分片数
+        """
+        try:
+            from backend.config.settings import TEMP_DIR, DETECTION_IMAGES_DIR
+            from backend.models.database import UploadSession, get_db_manager
+
+            logger.info(f"[MERGE_EXECUTING] taskId={task_id}, uploadId={uploadId}")
+
+            # 更新任务进度
+            self.update_progress(task_id, 10, "准备合并文件")
+
+            # 合并分片
+            session_dir = Path(TEMP_DIR) / uploadId
+            output_dir = Path(DETECTION_IMAGES_DIR)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            output_path = output_dir / fileName
+
+            logger.info(f"[MERGE_COMBINING] uploadId={uploadId}, outputPath={output_path}")
+
+            with open(output_path, "wb") as output_file:
+                for i in range(totalChunks):
+                    chunk_path = session_dir / f"chunk_{i}"
+                    if not chunk_path.exists():
+                        raise FileNotFoundError(f"分片文件丢失: chunk_{i}")
+
+                    with open(chunk_path, "rb") as chunk_file:
+                        output_file.write(chunk_file.read())
+
+                    # 更新进度
+                    progress = 10 + int((i / totalChunks) * 80)
+                    self.update_progress(task_id, progress, f"合并中 ({i+1}/{totalChunks})")
+
+            # 验证文件大小
+            actual_size = output_path.stat().st_size
+            if actual_size != fileSize:
+                output_path.unlink()
+                raise ValueError(
+                    f"文件大小不匹配: 期望 {fileSize}, 实际 {actual_size}"
+                )
+
+            logger.info(
+                f"[MERGE_COMPLETE] uploadId={uploadId}, filePath={output_path}, "
+                f"fileSize={actual_size}"
+            )
+
+            # 更新数据库中的会话状态
+            db_manager = get_db_manager()
+            db_session = db_manager.get_session()
+            try:
+                upload_session = db_session.query(UploadSession).filter(
+                    UploadSession.upload_id == uploadId
+                ).first()
+
+                if upload_session:
+                    upload_session.status = "completed"
+                    upload_session.file_path = str(output_path)
+                    upload_session.updated_at = datetime.now()
+                    db_session.commit()
+                    logger.info(f"[SESSION_UPDATED] uploadId={uploadId}, status=completed")
+                else:
+                    logger.warning(f"[SESSION_NOT_FOUND] uploadId={uploadId}")
+
+            finally:
+                db_session.close()
+
+            # 清理临时文件
+            shutil.rmtree(session_dir, ignore_errors=True)
+            logger.info(f"[TEMP_CLEANED] uploadId={uploadId}")
+
+            # 标记任务完成
+            self.complete_task(
+                task_id,
+                result={
+                    "uploadId": uploadId,
+                    "filePath": str(output_path),
+                    "fileName": fileName,
+                    "fileSize": actual_size,
+                },
+            )
+
+            logger.info(f"[MERGE_SUCCESS] taskId={task_id}, uploadId={uploadId}")
+
+        except Exception as e:
+            logger.error(f"[MERGE_FAILED] taskId={task_id}, uploadId={uploadId}, error={str(e)}")
+
+            # 更新数据库中的会话状态为失败
+            try:
+                from backend.models.database import UploadSession, get_db_manager
+
+                db_manager = get_db_manager()
+                db_session = db_manager.get_session()
+                try:
+                    upload_session = db_session.query(UploadSession).filter(
+                        UploadSession.upload_id == uploadId
+                    ).first()
+
+                    if upload_session:
+                        upload_session.status = "failed"
+                        upload_session.error_message = str(e)
+                        upload_session.updated_at = datetime.now()
+                        db_session.commit()
+                        logger.info(f"[SESSION_FAILED] uploadId={uploadId}")
+
+                finally:
+                    db_session.close()
+
+            except Exception as db_error:
+                logger.error(f"[SESSION_UPDATE_FAILED] uploadId={uploadId}, error={str(db_error)}")
+
+            # 标记任务失败
+            self.fail_task(task_id, str(e))
 
 
 # 全局任务管理器实例

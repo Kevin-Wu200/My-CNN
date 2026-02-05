@@ -6,24 +6,28 @@
 
 import logging
 import os
+import json
 from pathlib import Path
 from typing import Dict, Any
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
 from pydantic import BaseModel, field_validator
 import shutil
+from datetime import datetime, timedelta
+from sqlalchemy.orm import Session
 
 from backend.config.settings import (
     UPLOAD_DIR,
     DETECTION_IMAGES_DIR,
     TEMP_DIR,
 )
+from backend.models.database import UploadSession, get_db_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/upload", tags=["upload"])
 
-# 上传会话存储（生产环境应使用 Redis）
-upload_sessions: Dict[str, Dict[str, Any]] = {}
+# 获取数据库管理器
+db_manager = get_db_manager()
 
 
 class CompleteUploadRequest(BaseModel):
@@ -46,6 +50,17 @@ class CompleteUploadRequest(BaseModel):
         if not v or not v.strip():
             raise ValueError("不能为空")
         return v
+
+
+class UploadStatusResponse(BaseModel):
+    """上传状态响应模型"""
+    uploadId: str
+    status: str  # uploading, merging, completed, failed
+    progress: int  # 0-100
+    uploadedChunks: int
+    totalChunks: int
+    filePath: str | None = None
+    errorMessage: str | None = None
 
 
 @router.post("/chunk")
@@ -71,6 +86,7 @@ async def upload_chunk(
     Returns:
         包含上传结果的 JSON 响应
     """
+    db_session = db_manager.get_session()
     try:
         # 验证参数
         if chunkIndex < 0 or chunkIndex >= totalChunks:
@@ -97,27 +113,57 @@ async def upload_chunk(
             f.write(chunk_content)
 
         logger.info(
-            f"分片上传成功: uploadId={uploadId}, chunkIndex={chunkIndex}, "
+            f"[CHUNK_RECEIVED] uploadId={uploadId}, chunkIndex={chunkIndex}, "
             f"chunkSize={len(chunk_content)}, fileName={fileName}"
         )
 
-        # 更新会话信息
-        if uploadId not in upload_sessions:
-            upload_sessions[uploadId] = {
-                "fileName": fileName,
-                "fileSize": fileSize,
-                "totalChunks": totalChunks,
-                "uploadedChunks": set(),
-            }
+        # 从数据库获取或创建会话
+        upload_session = db_session.query(UploadSession).filter(
+            UploadSession.upload_id == uploadId
+        ).first()
 
-        upload_sessions[uploadId]["uploadedChunks"].add(chunkIndex)
+        if not upload_session:
+            # 创建新会话
+            uploaded_chunks_set = {chunkIndex}
+            upload_session = UploadSession(
+                upload_id=uploadId,
+                file_name=fileName,
+                file_size=fileSize,
+                total_chunks=totalChunks,
+                uploaded_chunks=json.dumps(list(uploaded_chunks_set)),
+                status="uploading",
+                created_at=datetime.now(),
+                updated_at=datetime.now(),
+            )
+            db_session.add(upload_session)
+            logger.info(
+                f"[SESSION_CREATED] uploadId={uploadId}, totalChunks={totalChunks}"
+            )
+        else:
+            # 更新现有会话
+            uploaded_chunks_set = set(json.loads(upload_session.uploaded_chunks))
+            uploaded_chunks_set.add(chunkIndex)
+            upload_session.uploaded_chunks = json.dumps(list(uploaded_chunks_set))
+            upload_session.updated_at = datetime.now()
+
+        db_session.commit()
+
+        uploaded_count = len(json.loads(upload_session.uploaded_chunks))
+        progress = int((uploaded_count / totalChunks) * 100)
+
+        logger.info(
+            f"[CHUNKS_UPDATED] uploadId={uploadId}, uploaded={uploaded_count}/{totalChunks}, "
+            f"progress={progress}%"
+        )
 
         return {
             "status": "success",
             "message": "分片上传成功",
             "uploadId": uploadId,
             "chunkIndex": chunkIndex,
-            "uploadedChunks": len(upload_sessions[uploadId]["uploadedChunks"]),
+            "uploadedChunks": uploaded_count,
+            "totalChunks": totalChunks,
+            "progress": progress,
         }
 
     except HTTPException:
@@ -128,6 +174,8 @@ async def upload_chunk(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"分片上传失败: {str(e)}",
         )
+    finally:
+        db_session.close()
 
 
 @router.post("/complete")
@@ -135,14 +183,15 @@ async def complete_upload(
     request: CompleteUploadRequest,
 ) -> Dict[str, Any]:
     """
-    完成文件上传（合并所有分片）
+    完成文件上传（提交合并任务）
 
     Args:
         request: 包含 uploadId、fileName、fileSize、totalChunks 的请求体
 
     Returns:
-        包含最终文件路径的 JSON 响应
+        包含任务 ID 的 JSON 响应（202 Accepted）
     """
+    db_session = db_manager.get_session()
     try:
         uploadId = request.uploadId
         fileName = request.fileName
@@ -150,7 +199,7 @@ async def complete_upload(
         totalChunks = request.totalChunks
 
         logger.info(
-            f"完成上传请求: uploadId={uploadId}, fileName={fileName}, "
+            f"[COMPLETE_REQUEST] uploadId={uploadId}, fileName={fileName}, "
             f"fileSize={fileSize}, totalChunks={totalChunks}"
         )
 
@@ -166,92 +215,194 @@ async def complete_upload(
                 detail="fileSize 和 totalChunks 必须大于 0",
             )
 
-        # 验证会话
-        if uploadId not in upload_sessions:
-            logger.error(f"上传会话不存在: {uploadId}, 现有会话: {list(upload_sessions.keys())}")
+        # 从数据库查询会话
+        upload_session = db_session.query(UploadSession).filter(
+            UploadSession.upload_id == uploadId
+        ).first()
+
+        if not upload_session:
+            logger.error(f"[SESSION_NOT_FOUND] uploadId={uploadId}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"上传会话不存在: {uploadId}",
             )
 
-        session = upload_sessions[uploadId]
-
         # 验证所有分片是否已上传
-        uploaded_count = len(session["uploadedChunks"])
+        uploaded_chunks_set = set(json.loads(upload_session.uploaded_chunks))
+        uploaded_count = len(uploaded_chunks_set)
+
         if uploaded_count != totalChunks:
+            missing_chunks = set(range(totalChunks)) - uploaded_chunks_set
             logger.warning(
-                f"分片不完整: uploadId={uploadId}, 已上传={uploaded_count}, "
-                f"总数={totalChunks}, 缺失分片={set(range(totalChunks)) - session['uploadedChunks']}"
+                f"[CHUNKS_INCOMPLETE] uploadId={uploadId}, uploaded={uploaded_count}/{totalChunks}, "
+                f"missing={sorted(missing_chunks)}"
             )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"分片不完整: 已上传 {uploaded_count}/{totalChunks}",
+                detail=f"分片不完整: 已上传 {uploaded_count}/{totalChunks}，缺失分片: {sorted(missing_chunks)}",
             )
 
         # 验证分片索引是否连续（0 到 totalChunks-1）
         expected_chunks = set(range(totalChunks))
-        if session["uploadedChunks"] != expected_chunks:
+        if uploaded_chunks_set != expected_chunks:
             logger.error(
-                f"分片索引不连续: uploadId={uploadId}, 期望={expected_chunks}, "
-                f"实际={session['uploadedChunks']}"
+                f"[CHUNKS_INVALID] uploadId={uploadId}, expected={expected_chunks}, "
+                f"actual={uploaded_chunks_set}"
             )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"分片索引不连续: 期望 {expected_chunks}, 实际 {session['uploadedChunks']}",
+                detail=f"分片索引不连续",
             )
 
-        # 合并分片
-        session_dir = Path(TEMP_DIR) / uploadId
-        output_dir = Path(DETECTION_IMAGES_DIR)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"[ALL_CHUNKS_RECEIVED] uploadId={uploadId}")
 
-        output_path = output_dir / fileName
+        # 更新会话状态为 "merging"
+        upload_session.status = "merging"
+        upload_session.updated_at = datetime.now()
+        db_session.commit()
 
-        with open(output_path, "wb") as output_file:
-            for i in range(totalChunks):
-                chunk_path = session_dir / f"chunk_{i}"
-                if not chunk_path.exists():
-                    raise HTTPException(
-                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=f"分片文件丢失: chunk_{i}",
-                    )
+        logger.info(f"[MERGE_START] uploadId={uploadId}")
 
-                with open(chunk_path, "rb") as chunk_file:
-                    output_file.write(chunk_file.read())
+        # 提交后台合并任务
+        from backend.services.background_task_manager import get_task_manager
+        task_manager = get_task_manager()
 
-        # 验证文件大小
-        actual_size = output_path.stat().st_size
-        if actual_size != fileSize:
-            output_path.unlink()
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"文件大小不匹配: 期望 {fileSize}, 实际 {actual_size}",
-            )
-
-        logger.info(
-            f"文件上传完成: uploadId={uploadId}, fileName={fileName}, "
-            f"fileSize={fileSize}, filePath={output_path}"
+        task_id = task_manager.submit_merge_task(
+            uploadId=uploadId,
+            fileName=fileName,
+            fileSize=fileSize,
+            totalChunks=totalChunks,
         )
 
-        # 清理临时文件
-        shutil.rmtree(session_dir, ignore_errors=True)
-        del upload_sessions[uploadId]
+        logger.info(f"[MERGE_TASK_SUBMITTED] uploadId={uploadId}, taskId={task_id}")
 
         return {
-            "status": "success",
-            "message": "文件上传完成",
+            "status": "accepted",
+            "message": "文件合并任务已提交",
             "uploadId": uploadId,
-            "file_path": str(output_path),
-            "fileName": fileName,
-            "fileSize": fileSize,
-            "totalChunks": totalChunks,
+            "taskId": task_id,
         }
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"文件上传完成失败: {str(e)}")
+        logger.error(f"[COMPLETE_ERROR] uploadId={request.uploadId}, error={str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"文件上传完成失败: {str(e)}",
+            detail=f"完成上传失败: {str(e)}",
         )
+    finally:
+        db_session.close()
+
+
+@router.get("/status/{uploadId}")
+async def get_upload_status(uploadId: str) -> UploadStatusResponse:
+    """
+    查询上传状态
+
+    Args:
+        uploadId: 上传会话 ID
+
+    Returns:
+        上传状态信息
+    """
+    db_session = db_manager.get_session()
+    try:
+        upload_session = db_session.query(UploadSession).filter(
+            UploadSession.upload_id == uploadId
+        ).first()
+
+        if not upload_session:
+            logger.warning(f"[STATUS_NOT_FOUND] uploadId={uploadId}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"上传会话不存在: {uploadId}",
+            )
+
+        uploaded_chunks_set = set(json.loads(upload_session.uploaded_chunks))
+        uploaded_count = len(uploaded_chunks_set)
+        progress = int((uploaded_count / upload_session.total_chunks) * 100)
+
+        logger.info(
+            f"[STATUS_QUERY] uploadId={uploadId}, status={upload_session.status}, "
+            f"progress={progress}%"
+        )
+
+        return UploadStatusResponse(
+            uploadId=uploadId,
+            status=upload_session.status,
+            progress=progress,
+            uploadedChunks=uploaded_count,
+            totalChunks=upload_session.total_chunks,
+            filePath=upload_session.file_path,
+            errorMessage=upload_session.error_message,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[STATUS_ERROR] uploadId={uploadId}, error={str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"查询上传状态失败: {str(e)}",
+        )
+    finally:
+        db_session.close()
+
+
+@router.delete("/cleanup")
+async def cleanup_old_sessions() -> Dict[str, Any]:
+    """
+    清理超过 24 小时未完成的上传会话
+
+    Returns:
+        清理结果统计
+    """
+    db_session = db_manager.get_session()
+    try:
+        # 计算 24 小时前的时间
+        cutoff_time = datetime.now() - timedelta(hours=24)
+
+        # 查询超时的会话
+        old_sessions = db_session.query(UploadSession).filter(
+            UploadSession.status.in_(["uploading", "merging"]),
+            UploadSession.updated_at < cutoff_time,
+        ).all()
+
+        cleaned_count = 0
+        for session in old_sessions:
+            try:
+                # 删除临时文件
+                session_dir = Path(TEMP_DIR) / session.upload_id
+                if session_dir.exists():
+                    shutil.rmtree(session_dir, ignore_errors=True)
+                    logger.info(f"[CLEANUP_TEMP] uploadId={session.upload_id}")
+
+                # 标记为失败
+                session.status = "failed"
+                session.error_message = "上传超时，会话已清理"
+                session.updated_at = datetime.now()
+                cleaned_count += 1
+
+                logger.info(f"[SESSION_CLEANED] uploadId={session.upload_id}")
+            except Exception as e:
+                logger.error(f"[CLEANUP_ERROR] uploadId={session.upload_id}, error={str(e)}")
+
+        db_session.commit()
+
+        logger.info(f"[CLEANUP_COMPLETE] cleaned={cleaned_count} sessions")
+
+        return {
+            "status": "success",
+            "message": f"清理了 {cleaned_count} 个超时会话",
+            "cleaned_count": cleaned_count,
+        }
+
+    except Exception as e:
+        logger.error(f"[CLEANUP_FAILED] error={str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"清理会话失败: {str(e)}",
+        )
+    finally:
+        db_session.close()
