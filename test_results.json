@@ -1,0 +1,28 @@
+{
+  "timestamp": "2026-02-05T14:13:27.537946",
+  "start_time": "2026-02-05T14:12:35.243657",
+  "end_time": "2026-02-05T14:13:27.536053",
+  "tests": {
+    "基础功能验证": {
+      "success": true,
+      "message": "测试通过",
+      "elapsed": 3.582559108734131
+    },
+    "集成测试验证": {
+      "success": true,
+      "message": "测试通过",
+      "elapsed": 23.620529890060425
+    },
+    "压力测试验证": {
+      "success": true,
+      "message": "测试通过",
+      "elapsed": 19.068352937698364
+    }
+  },
+  "summary": {
+    "total_tests": 3,
+    "passed_tests": 3,
+    "failed_tests": 0,
+    "pass_rate": 100.0
+  }
+}

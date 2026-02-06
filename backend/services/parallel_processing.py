@@ -169,7 +169,12 @@ class ParallelProcessingService:
                 # 提交所有分块任务
                 for tile_idx, tile in enumerate(tiles):
                     try:
-                        result = pool.apply_async(process_func, tile)
+                        # 修复：使用 args=(tile,) 而不是直接传递 tile
+                        # pool.apply_async(func, args) 会将 args 中的元素作为函数的参数
+                        # 如果 tile 是一个元组 (service, tile_obj, n_clusters, min_area, nodata_value)
+                        # 直接传递会被解包为 5 个参数，但函数只期望 1 个参数
+                        # 使用 args=(tile,) 会将整个元组作为单个参数传递
+                        result = pool.apply_async(process_func, args=(tile,))
                         results.append((tile_idx, result))
                         logger.debug(
                             f"分块 {tile_idx} 已提交到工作进程池 "
@@ -348,6 +353,9 @@ class ParallelProcessingService:
             try:
                 # 使用进程池处理
                 logger.debug(f"提交 {len(chunk_data_list)} 个块到进程池...")
+                # 使用 map 而不是 starmap
+                # chunk_data_list 中的每个元素都是一个元组 (service, tile, n_clusters, min_area, nodata_value)
+                # pool.map() 会将每个元组作为单个参数传递给函数
                 results = pool.map(process_func, chunk_data_list)
                 logger.info(f"所有块已处理: {len(results)} 个结果")
 

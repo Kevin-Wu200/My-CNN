@@ -1,0 +1,126 @@
+INFO:     Started server process [12937]
+INFO:     Waiting for application startup.
+2026-02-06 01:08:41 - backend.api.main - [PID:12937] [TID:8508861504] - INFO - ============================================================
+2026-02-06 01:08:41 - backend.api.main - [PID:12937] [TID:8508861504] - INFO - FastAPI 应用启动完成
+2026-02-06 01:08:41 - backend.api.main - [PID:12937] [TID:8508861504] - INFO - 进程 ID: 12937
+2026-02-06 01:08:41 - backend.api.main - [PID:12937] [TID:8508861504] - INFO - CPU 核心数: 10
+2026-02-06 01:08:41 - backend.api.main - [PID:12937] [TID:8508861504] - INFO - ============================================================
+2026-02-06 01:08:41 - backend.api.main - [PID:12937] [TID:8508861504] - INFO - 配置数值库线程限制...
+2026-02-06 01:08:43 - backend.api.main - [PID:12937] [TID:8508861504] - INFO - ============================================================
+2026-02-06 01:08:43 - backend.api.main - [PID:12937] [TID:8508861504] - INFO - 后端服务已准备就绪，监听 0.0.0.0:8000
+2026-02-06 01:08:43 - backend.api.main - [PID:12937] [TID:8508861504] - INFO - ============================================================
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:62873 - "GET /api/upload/status/test HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63121 - "GET /api/upload/status/test HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63123 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63127 - "GET /api/upload/status/test-upload-1770311352 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63129 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63131 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63133 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63135 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63137 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63139 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63141 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63143 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63145 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63147 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63149 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63151 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63153 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63155 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63157 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63159 - "POST /api/unsupervised/detect?image_path=%2Fnonexistent%2Ffile.tif&n_clusters=4&min_area=50 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63161 - "POST /api/upload/chunk HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63630 - "GET /docs HTTP/1.1" 200 OK
+[STATUS_NOT_FOUND] uploadId=test
+INFO:     127.0.0.1:63710 - "GET /upload/status/test HTTP/1.1" 404 Not Found
+[STATUS_NOT_FOUND] uploadId=test
+INFO:     127.0.0.1:63918 - "GET /upload/status/test HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63920 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63922 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63924 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63926 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63928 - "GET /upload/status/test-upload-1770311415 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63930 - "POST /upload/complete HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63932 - "GET /upload/status/test-upload-1770311415 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63957 - "GET /upload/status/test-upload-1770311415 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63959 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63961 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63963 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63965 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63967 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63969 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63971 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63973 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63975 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63977 - "POST /upload/chunk HTTP/1.1" 200 OK
+[RATE_LIMIT_EXCEEDED] uploadId=rate-limit-test-1770311417, chunkIndex=10
+INFO:     127.0.0.1:63979 - "POST /upload/chunk HTTP/1.1" 429 Too Many Requests
+[RATE_LIMIT_EXCEEDED] uploadId=rate-limit-test-1770311417, chunkIndex=11
+INFO:     127.0.0.1:63981 - "POST /upload/chunk HTTP/1.1" 429 Too Many Requests
+[RATE_LIMIT_EXCEEDED] uploadId=rate-limit-test-1770311417, chunkIndex=12
+INFO:     127.0.0.1:63983 - "POST /upload/chunk HTTP/1.1" 429 Too Many Requests
+[RATE_LIMIT_EXCEEDED] uploadId=rate-limit-test-1770311417, chunkIndex=13
+INFO:     127.0.0.1:63985 - "POST /upload/chunk HTTP/1.1" 429 Too Many Requests
+[RATE_LIMIT_EXCEEDED] uploadId=rate-limit-test-1770311417, chunkIndex=14
+INFO:     127.0.0.1:63987 - "POST /upload/chunk HTTP/1.1" 429 Too Many Requests
+[API] 影像文件不存在: /nonexistent/file.tif
+INFO:     127.0.0.1:63989 - "POST /unsupervised/detect?image_path=%2Fnonexistent%2Ffile.tif&n_clusters=4&min_area=50 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63991 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63993 - "POST /upload/chunk HTTP/1.1" 200 OK
+[SESSION_NOT_FOUND] uploadId=incomplete-test-1770311417
+INFO:     127.0.0.1:63995 - "POST /upload/complete HTTP/1.1" 404 Not Found
+[STATUS_NOT_FOUND] uploadId=test
+INFO:     127.0.0.1:50147 - "GET /upload/status/test HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:50149 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50151 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50153 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50155 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50157 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50159 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50163 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50165 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50167 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50169 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50172 - "POST /upload/complete HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50175 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50177 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50179 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50181 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50183 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50185 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50187 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50189 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50191 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50193 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50195 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50199 - "POST /upload/complete HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50197 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50201 - "POST /upload/complete HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50203 - "POST /upload/complete HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50205 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50207 - "POST /upload/complete HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50209 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50211 - "POST /upload/complete HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50213 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50215 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50217 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50219 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50221 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50223 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50225 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50227 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50229 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50231 - "POST /upload/chunk HTTP/1.1" 200 OK
+[RATE_LIMIT_EXCEEDED] uploadId=boundary-大量小分片-1770311623, chunkIndex=10
+INFO:     127.0.0.1:50233 - "POST /upload/chunk HTTP/1.1" 429 Too Many Requests
+INFO:     127.0.0.1:50235 - "POST /upload/chunk HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:50237 - "POST /upload/chunk HTTP/1.1" 422 Unprocessable Entity
+INFO:     127.0.0.1:50239 - "POST /upload/chunk HTTP/1.1" 200 OK
+[STATUS_NOT_FOUND] uploadId=nonexistent-upload-id
+INFO:     127.0.0.1:50241 - "GET /upload/status/nonexistent-upload-id HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:50244 - "POST /upload/chunk HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50247 - "GET /upload/status/status-query-1770311623 HTTP/1.1" 200 OK
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/multiprocessing/resource_tracker.py:216: UserWarning: resource_tracker: There appear to be 5 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

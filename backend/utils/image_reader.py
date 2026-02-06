@@ -15,8 +15,10 @@ logger = logging.getLogger(__name__)
 # 启用 GDAL 异常
 gdal.UseExceptions()
 
-# 文件大小限制（500MB）
-MAX_FILE_SIZE = 500 * 1024 * 1024
+# 文件大小限制（20GB）
+# 注意：真实的遥感影像可能达到4GB或更大
+# 原始限制500MB过小，已调整为20GB以支持大型遥感影像
+MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024
 
 
 class ImageReader:
