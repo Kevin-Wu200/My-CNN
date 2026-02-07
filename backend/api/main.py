@@ -163,17 +163,14 @@ class GracefulShutdownManager:
 
             for task_id, task_info in running_tasks.items():
                 logger.info(
-                    f"标记任务为失败: {task_id} "
+                    f"强制终止任务: {task_id} "
                     f"(类型: {task_info.get('task_type')}, "
                     f"进度: {task_info.get('progress')}%)"
                 )
-                # 标记任务为失败
-                task_manager.fail_task(
-                    task_id,
-                    error="服务器关闭，任务被中断"
-                )
+                # 强制终止任务（包括进程池）
+                task_manager.force_terminate_task(task_id)
 
-            logger.info(f"已标记 {len(running_tasks)} 个任务为失败")
+            logger.info(f"已强制终止 {len(running_tasks)} 个任务")
 
         except Exception as e:
             logger.error(f"终止运行中的任务失败: {str(e)}", exc_info=True)

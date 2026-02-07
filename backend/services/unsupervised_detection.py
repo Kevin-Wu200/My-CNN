@@ -239,6 +239,7 @@ class UnsupervisedDiseaseDetectionService:
         优化说明：
         - 及时释放中间特征矩阵，降低峰值内存占用
         - 使用 float32 保持内存效率
+        - 增强数值稳定性，避免 K-means 计算异常
 
         Args:
             image_data: 归一化后的影像数据 (H, W, B)
@@ -271,8 +272,53 @@ class UnsupervisedDiseaseDetectionService:
             del spectral_features, texture_features
             gc.collect()
 
-            # 特征标准化（零均值、单位方差）
-            feature_matrix_normalized = self.scaler.fit_transform(feature_matrix)
+            # 第一步：清理无效值（NaN、Inf）
+            nan_mask = np.isnan(feature_matrix)
+            inf_mask = np.isinf(feature_matrix)
+            invalid_mask = nan_mask | inf_mask
+
+            if np.any(invalid_mask):
+                n_invalid = np.sum(invalid_mask)
+                logger.warning(
+                    f"特征矩阵中发现 {n_invalid} 个无效值 "
+                    f"(NaN: {np.sum(nan_mask)}, Inf: {np.sum(inf_mask)})，将替换为0"
+                )
+                # 将无效值替换为0
+                feature_matrix[invalid_mask] = 0
+
+            # 第二步：裁剪极端值，避免数值溢出
+            # 使用百分位数裁剪，保留 [1%, 99%] 范围内的值
+            for col_idx in range(feature_matrix.shape[1]):
+                col_data = feature_matrix[:, col_idx]
+                # 只对非零值计算百分位数
+                non_zero_mask = col_data != 0
+                if np.any(non_zero_mask):
+                    non_zero_data = col_data[non_zero_mask]
+                    p1 = np.percentile(non_zero_data, 1)
+                    p99 = np.percentile(non_zero_data, 99)
+                    # 裁剪极端值
+                    col_data = np.clip(col_data, p1, p99)
+                    feature_matrix[:, col_idx] = col_data
+
+            logger.info("特征矩阵极端值裁剪完成")
+
+            # 第三步：特征标准化（零均值、单位方差）
+            # 使用 RobustScaler 替代 StandardScaler，更鲁棒
+            from sklearn.preprocessing import RobustScaler
+            robust_scaler = RobustScaler()
+            feature_matrix_normalized = robust_scaler.fit_transform(feature_matrix)
+
+            # 第四步：再次检查标准化后的无效值
+            nan_mask_after = np.isnan(feature_matrix_normalized)
+            inf_mask_after = np.isinf(feature_matrix_normalized)
+            invalid_mask_after = nan_mask_after | inf_mask_after
+
+            if np.any(invalid_mask_after):
+                n_invalid_after = np.sum(invalid_mask_after)
+                logger.warning(
+                    f"标准化后仍有 {n_invalid_after} 个无效值，将替换为0"
+                )
+                feature_matrix_normalized[invalid_mask_after] = 0
 
             # 释放未标准化的特征矩阵
             del feature_matrix
@@ -305,6 +351,16 @@ class UnsupervisedDiseaseDetectionService:
         try:
             if feature_matrix is None or feature_matrix.size == 0:
                 return False, None, None, "特征矩阵为空"
+
+            # 再次检查特征矩阵中的无效值
+            if np.any(np.isnan(feature_matrix)) or np.any(np.isinf(feature_matrix)):
+                n_nan = np.sum(np.isnan(feature_matrix))
+                n_inf = np.sum(np.isinf(feature_matrix))
+                logger.error(
+                    f"特征矩阵包含无效值 (NaN: {n_nan}, Inf: {n_inf})，"
+                    "无法进行聚类"
+                )
+                return False, None, None, "特征矩阵包含无效值"
 
             # 执行 K-means 聚类
             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
