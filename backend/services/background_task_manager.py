@@ -503,6 +503,35 @@ class BackgroundTaskManager:
             # 第8步：在日志中明确区分三种状态 - 合并完成且文件存在
             logger.info(f"[MERGE_STATUS_MERGE_COMPLETE_FILE_EXISTS] uploadId={uploadId}, filePath={output_path}, fileSize={actual_size}")
 
+            # 第7步：在上传完成后，将写入成功的 tif 文件，显式复制到 storage/detection_images
+            logger.info(f"[COPY_TO_DETECTION_START] uploadId={uploadId}, sourcePath={output_path}")
+
+            detection_images_dir = FilePathManager.get_detection_images_dir()
+            FilePathManager.ensure_directory_exists(detection_images_dir)
+
+            # 生成目标文件路径：使用原始文件名或uploadId
+            detection_file_name = Path(fileName).name if fileName else f"{uploadId}.tif"
+            detection_file_path = detection_images_dir / detection_file_name
+
+            # 复制文件到 detection_images
+            try:
+                shutil.copy2(output_path, detection_file_path)
+                logger.info(f"[FILE_COPIED_TO_DETECTION] uploadId={uploadId}, sourcePath={output_path}, destPath={detection_file_path}")
+
+                # 验证复制后的文件
+                if not detection_file_path.exists():
+                    raise FileNotFoundError(f"复制后的文件不存在: {detection_file_path}")
+
+                detection_file_size = detection_file_path.stat().st_size
+                if detection_file_size != actual_size:
+                    detection_file_path.unlink()
+                    raise ValueError(f"复制后文件大小不匹配: 期望 {actual_size}, 实际 {detection_file_size}")
+
+                logger.info(f"[DETECTION_FILE_VALIDATION_PASS] uploadId={uploadId}, filePath={detection_file_path}, fileSize={detection_file_size}")
+            except Exception as copy_error:
+                logger.error(f"[COPY_TO_DETECTION_FAILED] uploadId={uploadId}, error={str(copy_error)}")
+                raise IOError(f"复制文件到 detection_images 失败: {str(copy_error)}")
+
             # 第5步：将合并后的完整tif文件路径保存到后端的任务状态或上传记录中
             db_manager = get_db_manager()
             db_session = db_manager.get_session()
