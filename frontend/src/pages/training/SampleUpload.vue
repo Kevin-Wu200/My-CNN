@@ -163,10 +163,10 @@ const handleUpload = async () => {
 
   isUploading.value = true
   try {
-    const response = await apiClient.upload('/training/upload', selectedFile.value)
+    const response = await apiClient.upload('/api/training/upload', selectedFile.value)
 
     // 自动校验坐标系
-    const coordinateCheckResult = await apiClient.post('/training/check-coordinates', {
+    const coordinateCheckResult = await apiClient.post('/api/training/check-coordinates', {
       taskId: response.taskId
     })
 
