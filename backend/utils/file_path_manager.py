@@ -98,17 +98,31 @@ class FilePathManager:
         return chunk_path
 
     @classmethod
-    def get_merged_file_path(cls, file_name: str) -> Path:
+    def get_merged_file_path(cls, file_name: str, upload_id: str = None) -> Path:
         """
         获取合并后的文件路径
 
+        第4步：生成唯一的完整tif文件路径
+        - 如果提供了upload_id，使用 storage/merged/{uploadId}.tif 格式
+        - 否则使用 storage/detection_images/{file_name} 格式（向后兼容）
+
         Args:
             file_name: 文件名
+            upload_id: 上传会话ID（可选，用于生成唯一路径）
 
         Returns:
             合并后的文件路径
         """
-        merged_path = cls._DETECTION_IMAGES_ROOT / file_name
+        if upload_id:
+            # 第4步：生成唯一的完整tif文件路径
+            merged_dir = cls._STORAGE_ROOT / "merged"
+            cls.ensure_directory_exists(merged_dir)
+            # 使用uploadId作为文件名，保留原始文件的扩展名
+            file_ext = Path(file_name).suffix or ".tif"
+            merged_path = merged_dir / f"{upload_id}{file_ext}"
+        else:
+            # 向后兼容：如果没有提供upload_id，使用原始逻辑
+            merged_path = cls._DETECTION_IMAGES_ROOT / file_name
         return merged_path
 
     @classmethod

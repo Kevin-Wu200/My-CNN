@@ -391,6 +391,16 @@ class BackgroundTaskManager:
         """
         执行文件合并任务（在后台线程中运行）
 
+        按照8个步骤修复分片合并流程：
+        1. 定位并检查分片合并函数是否真的被调用，在合并函数入口和出口强制打印日志
+        2. 确保合并逻辑只做一件事 - 按chunkIndex顺序读取所有分片文件，按二进制顺序写入一个新的完整tif文件
+        3. 在合并前增加严格校验 - 校验分片数量是否大于1，校验每一个分片文件真实存在
+        4. 合并成功后，明确生成一个唯一的完整tif文件路径，例如storage/merged/{uploadId}.tif，并立即校验该文件在磁盘上真实存在
+        5. 将合并后的完整tif文件路径保存到后端的任务状态或上传记录中
+        6. 禁止任何检测逻辑直接使用分片文件，检测模块只能接受"合并完成后的完整tif"
+        7. 在无监督检测启动前，强制校验完整tif文件是否存在
+        8. 在日志中明确区分三种状态 - 仅分片存在、合并进行中、合并完成且文件存在
+
         Args:
             task_id: 任务 ID
             uploadId: 上传会话 ID
@@ -403,37 +413,53 @@ class BackgroundTaskManager:
             from backend.models.database import UploadSession, get_db_manager
             from backend.utils.file_path_manager import FilePathManager
 
-            logger.info(f"[MERGE_EXECUTING] taskId={task_id}, uploadId={uploadId}")
+            # 第1步：定位并检查分片合并函数是否真的被调用，在合并函数入口强制打印日志
+            logger.info(f"[MERGE_EXECUTING_START] taskId={task_id}, uploadId={uploadId}, fileName={fileName}, totalChunks={totalChunks}")
 
             # 更新任务进度
-            self.update_progress(task_id, 10, "准备合并文件")
+            self.update_progress(task_id, 5, "准备合并文件")
 
-            # 步骤7: 统一文件路径来源 - 使用 FilePathManager 获取路径
+            # 获取分片目录
             session_dir = FilePathManager.get_chunk_dir(uploadId)
-            output_dir = FilePathManager.get_detection_images_dir()
-            FilePathManager.ensure_directory_exists(output_dir)
 
-            output_path = FilePathManager.get_merged_file_path(fileName)
+            # 第8步：在日志中明确区分三种状态 - 仅分片存在
+            logger.info(f"[CHUNK_STATUS_ONLY_CHUNKS_EXIST] uploadId={uploadId}, chunkDir={session_dir}, totalChunks={totalChunks}")
 
-            # 步骤4: 在合并逻辑中增加明确日志 - 开始合并
-            logger.info(
-                f"[MERGE_COMBINING_START] uploadId={uploadId}, outputPath={output_path}, "
-                f"totalChunks={totalChunks}"
-            )
+            # 第3步：在合并前增加严格校验 - 校验分片数量是否大于1
+            if totalChunks <= 1:
+                raise ValueError(f"分片数量无效: {totalChunks}，必须大于1")
+            logger.info(f"[CHUNK_COUNT_VALIDATION_PASS] uploadId={uploadId}, totalChunks={totalChunks}")
+
+            # 第3步：在合并前增加严格校验 - 校验每一个分片文件真实存在
+            logger.info(f"[CHUNK_FILES_VALIDATION_START] uploadId={uploadId}")
+            for i in range(totalChunks):
+                chunk_path = FilePathManager.get_chunk_path(uploadId, i)
+                if not chunk_path.exists():
+                    raise FileNotFoundError(f"分片文件丢失: chunk_{i} at {chunk_path}")
+                logger.debug(f"[CHUNK_FILE_EXISTS] uploadId={uploadId}, chunkIndex={i}, chunkPath={chunk_path}")
+            logger.info(f"[CHUNK_FILES_VALIDATION_PASS] uploadId={uploadId}, allChunksExist=True")
+
+            # 第4步：合并成功后，明确生成一个唯一的完整tif文件路径
+            output_path = FilePathManager.get_merged_file_path(fileName, uploadId)
+            logger.info(f"[MERGED_FILE_PATH_GENERATED] uploadId={uploadId}, outputPath={output_path}")
+
+            # 第8步：在日志中明确区分三种状态 - 合并进行中
+            logger.info(f"[MERGE_STATUS_MERGING_IN_PROGRESS] uploadId={uploadId}, outputPath={output_path}, totalChunks={totalChunks}")
+
+            # 第2步：确保合并逻辑只做一件事 - 按chunkIndex顺序读取所有分片文件，按二进制顺序写入一个新的完整tif文件
+            logger.info(f"[MERGE_COMBINING_START] uploadId={uploadId}, outputPath={output_path}, totalChunks={totalChunks}")
 
             with open(output_path, "wb") as output_file:
                 for i in range(totalChunks):
-                    # 步骤7: 统一文件路径来源 - 使用 FilePathManager 获取分片路径
                     chunk_path = FilePathManager.get_chunk_path(uploadId, i)
-                    if not chunk_path.exists():
-                        raise FileNotFoundError(f"分片文件丢失: chunk_{i}")
-
                     with open(chunk_path, "rb") as chunk_file:
-                        output_file.write(chunk_file.read())
+                        chunk_data = chunk_file.read()
+                        output_file.write(chunk_data)
 
                     # 更新进度
-                    progress = 10 + int((i / totalChunks) * 80)
+                    progress = 5 + int((i / totalChunks) * 75)
                     self.update_progress(task_id, progress, f"合并中 ({i+1}/{totalChunks})")
+                    logger.debug(f"[CHUNK_MERGED] uploadId={uploadId}, chunkIndex={i}, chunkSize={len(chunk_data)}")
 
             # 验证文件大小
             actual_size = output_path.stat().st_size
@@ -442,20 +468,17 @@ class BackgroundTaskManager:
                 raise ValueError(
                     f"文件大小不匹配: 期望 {fileSize}, 实际 {actual_size}"
                 )
+            logger.info(f"[FILE_SIZE_VALIDATION_PASS] uploadId={uploadId}, expectedSize={fileSize}, actualSize={actual_size}")
 
-            # 步骤4: 在合并逻辑中增加明确日志 - 合并完成
-            logger.info(
-                f"[MERGE_COMBINING_COMPLETE] uploadId={uploadId}, "
-                f"finalFilePath={output_path}, finalFileSize={actual_size}"
-            )
+            logger.info(f"[MERGE_COMBINING_COMPLETE] uploadId={uploadId}, finalFilePath={output_path}, finalFileSize={actual_size}")
 
-            # 步骤5: 合并完成后显式校验文件
+            # 第4步：合并成功后，立即校验该文件在磁盘上真实存在
             logger.info(f"[FILE_VALIDATION_START] uploadId={uploadId}, filePath={output_path}")
 
             # 检查文件是否存在
             if not output_path.exists():
                 raise FileNotFoundError(f"合并后文件不存在: {output_path}")
-            logger.info(f"[FILE_EXISTS_CHECK_PASS] uploadId={uploadId}")
+            logger.info(f"[FILE_EXISTS_CHECK_PASS] uploadId={uploadId}, filePath={output_path}")
 
             # 检查文件大小是否大于 0
             if actual_size <= 0:
@@ -477,7 +500,10 @@ class BackgroundTaskManager:
                 f"fileSize={actual_size}"
             )
 
-            # 更新数据库中的会话状态
+            # 第8步：在日志中明确区分三种状态 - 合并完成且文件存在
+            logger.info(f"[MERGE_STATUS_MERGE_COMPLETE_FILE_EXISTS] uploadId={uploadId}, filePath={output_path}, fileSize={actual_size}")
+
+            # 第5步：将合并后的完整tif文件路径保存到后端的任务状态或上传记录中
             db_manager = get_db_manager()
             db_session = db_manager.get_session()
             try:
@@ -486,7 +512,7 @@ class BackgroundTaskManager:
                 ).first()
 
                 if upload_session:
-                    # 步骤2: 在后端维护每个文件的上传状态 - 更新为 merge_complete
+                    # 更新为 merge_complete
                     upload_session.status = "merge_complete"
                     upload_session.file_path = str(output_path)
                     upload_session.updated_at = datetime.now()
@@ -496,7 +522,7 @@ class BackgroundTaskManager:
                         f"filePath={output_path}"
                     )
 
-                    # 步骤2: 在后端维护每个文件的上传状态 - 更新为 completed
+                    # 更新为 completed
                     upload_session.status = "completed"
                     upload_session.updated_at = datetime.now()
                     db_session.commit()
@@ -522,7 +548,8 @@ class BackgroundTaskManager:
                 },
             )
 
-            logger.info(f"[MERGE_SUCCESS] taskId={task_id}, uploadId={uploadId}")
+            # 第1步：在合并函数出口强制打印日志
+            logger.info(f"[MERGE_EXECUTING_COMPLETE] taskId={task_id}, uploadId={uploadId}, filePath={output_path}")
 
         except Exception as e:
             logger.error(f"[MERGE_FAILED] taskId={task_id}, uploadId={uploadId}, error={str(e)}")
