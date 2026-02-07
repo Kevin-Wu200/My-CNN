@@ -114,6 +114,8 @@ class ParallelProcessingService:
         num_workers: Optional[int] = None,
         max_workers: int = MAX_WORKERS_LIMIT,
         error_handling: str = "log",
+        task_manager=None,
+        task_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[List[Any]], List[Dict], str]:
         """
         并行处理多个影像分块
@@ -129,6 +131,8 @@ class ParallelProcessingService:
             error_handling: 错误处理方式
                 - "log": 记录错误但继续处理其他分块
                 - "stop": 遇到错误立即停止
+            task_manager: 任务管理器（用于进程注册和停止标志检查）
+            task_id: 任务ID（用于进度跟踪）
 
         Returns:
             (处理是否成功, 处理结果列表, 错误信息列表, 消息)
@@ -165,9 +169,20 @@ class ParallelProcessingService:
                 f"进程池ID: {id(pool)}"
             )
 
+            # 第五步：注册进程池到任务管理器
+            if task_manager and task_id:
+                task_manager.register_process(task_id, pool)
+                logger.info(f"[{task_id}] 进程池已注册到任务管理器")
+
             try:
                 # 提交所有分块任务
                 for tile_idx, tile in enumerate(tiles):
+                    # 检查停止标志
+                    if task_manager and task_manager.is_stop_requested(task_id):
+                        logger.info(f"[{task_id}] 检测任务被停止（分块提交中，已提交 {tile_idx}/{len(tiles)} 个分块）")
+                        ParallelProcessingService._cleanup_pool(pool, force=True)
+                        return False, None, [], "检测任务被用户停止"
+
                     try:
                         # 修复：使用 args=(tile,) 而不是直接传递 tile
                         # pool.apply_async(func, args) 会将 args 中的元素作为函数的参数
@@ -205,6 +220,12 @@ class ParallelProcessingService:
                 ResourceMonitor.log_resource_status("开始收集分块处理结果")
 
                 for result_idx, (tile_idx, result) in enumerate(results):
+                    # 检查停止标志
+                    if task_manager and task_manager.is_stop_requested(task_id):
+                        logger.info(f"[{task_id}] 检测任务被停止（结果收集中，已收集 {result_idx}/{len(results)} 个结果）")
+                        ParallelProcessingService._cleanup_pool(pool, force=True)
+                        return False, None, [], "检测任务被用户停止"
+
                     try:
                         logger.debug(
                             f"等待分块 {tile_idx} 的处理结果 "
@@ -279,6 +300,11 @@ class ParallelProcessingService:
                 ParallelProcessingService._cleanup_pool(pool, force=False)
                 logger.info(f"进程池已清理 (ID: {id(pool)})")
                 ResourceMonitor.log_resource_status(f"清理进程池后 (ID: {id(pool)})")
+
+                # 清理进程注册
+                if task_manager and task_id and task_id in task_manager.active_processes:
+                    del task_manager.active_processes[task_id]
+                    logger.info(f"[{task_id}] 进程注册已清理")
 
             logger.info(
                 f"并行处理完成: {len(processed_results)} 个结果, "

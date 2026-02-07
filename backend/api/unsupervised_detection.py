@@ -177,7 +177,20 @@ async def detect_disease(
         包含任务ID的 JSON 响应
     """
     try:
+        import os
+
         logger.info(f"[API] 收到无监督检测请求: image_path={image_path}, n_clusters={n_clusters}, min_area={min_area}")
+
+        # 第六步：禁止在uvicorn --reload模式下启动长时间运行的检测任务
+        if os.getenv("RELOAD_MODE", "false").lower() == "true":
+            logger.error(f"[API] 禁止在 --reload 模式下启动检测任务")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="禁止在开发模式（--reload）下启动长时间运行的检测任务，请在生产模式下运行",
+            )
+
+        # 第八步：在日志中明确打印检测任务启动
+        logger.info(f"[DETECTION_TASK_STARTUP] 检测任务启动")
 
         # 第八步：禁止接受 image_path=undefined，参数缺失直接返回 400 并记录错误来源
         if not image_path or image_path.strip() == "" or image_path == "undefined":
@@ -257,6 +270,64 @@ async def get_detection_task_status(task_id: str) -> Dict[str, Any]:
     return task
 
 
+@router.post("/stop/{task_id}")
+async def stop_detection_task(task_id: str) -> Dict[str, Any]:
+    """
+    停止无监督检测任务
+
+    Args:
+        task_id: 任务ID
+
+    Returns:
+        停止结果
+    """
+    try:
+        logger.info(f"[API] 收到停止检测请求: task_id={task_id}")
+
+        # 检查任务是否存在
+        task = task_manager.get_task_status(task_id)
+        if not task:
+            logger.warning(f"[API] 任务不存在: {task_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"任务不存在: {task_id}",
+            )
+
+        # 检查任务状态
+        if task["status"] != "running":
+            logger.warning(f"[API] 任务不在运行中: {task_id}, 当前状态: {task['status']}")
+            return {
+                "status": "skipped",
+                "task_id": task_id,
+                "message": f"任务不在运行中，当前状态: {task['status']}",
+            }
+
+        # 第四步：显式设置stop标志
+        logger.info(f"[API] 设置任务停止标志: {task_id}")
+        task_manager.set_stop_flag(task_id)
+
+        # 第五步：主动终止对应任务
+        logger.info(f"[API] 强制终止任务: {task_id}")
+        task_manager.force_terminate_task(task_id)
+
+        logger.info(f"[API] 任务已停止: {task_id}")
+
+        return {
+            "status": "stopped",
+            "task_id": task_id,
+            "message": "检测任务已停止",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] 停止任务失败: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"停止任务失败: {str(e)}",
+        )
+
+
 def _run_unsupervised_detection_safe(
     task_id: str, image_path: str, n_clusters: int, min_area: int
 ) -> None:
@@ -280,6 +351,12 @@ def _run_unsupervised_detection_safe(
         # 在后台线程中创建任务，使用指定的 task_id（确保任务ID一致）
         task_manager.create_task("unsupervised_detection", task_id=task_id)
         logger.info(f"[后台任务] 任务已创建: {task_id}")
+
+        # 第二步：注册当前线程
+        import threading
+        current_thread = threading.current_thread()
+        task_manager.register_thread(task_id, current_thread)
+        logger.info(f"[后台任务] 线程已注册: {task_id}, threadName={current_thread.name}")
 
         # 立即标记为运行中
         task_manager.start_task(task_id)
@@ -306,6 +383,11 @@ def _run_unsupervised_detection_safe(
                 logger.info(f"[后台任务] 任务已创建并标记为失败: {task_id}")
             except Exception as create_error:
                 logger.error(f"[后台任务] 创建失败任务记录失败: {task_id}, 错误: {str(create_error)}", exc_info=True)
+    finally:
+        # 清理线程注册
+        if task_id in task_manager.active_threads:
+            del task_manager.active_threads[task_id]
+            logger.info(f"[后台任务] 线程注册已清理: {task_id}")
 
 
 def _run_unsupervised_detection(
@@ -361,6 +443,12 @@ def _run_unsupervised_detection(
 
         logger.info(f"[{task_id}] 文件就绪检查完成，开始读取影像")
 
+        # 第三步：在计算主循环中检查停止标志
+        if task_manager.is_stop_requested(task_id):
+            logger.info(f"[{task_id}] 检测任务被停止（文件检查阶段）")
+            task_manager.cancel_task(task_id, "用户停止")
+            return
+
         task_manager.update_progress(task_id, 10, "读取影像中")
         logger.info(f"[{task_id}] 开始读取影像")
 
@@ -374,6 +462,13 @@ def _run_unsupervised_detection(
 
         logger.info(f"[{task_id}] 影像读取成功，尺寸: {image_data.shape}")
         ResourceMonitor.log_resource_status(f"影像读取完成 [{task_id}]")
+
+        # 第三步：检查停止标志
+        if task_manager.is_stop_requested(task_id):
+            logger.info(f"[{task_id}] 检测任务被停止（影像读取后）")
+            task_manager.cancel_task(task_id, "用户停止")
+            return
+
         task_manager.update_progress(task_id, 30, "执行检测中")
 
         # 执行无监督检测，传递任务管理器用于进度跟踪
@@ -394,6 +489,13 @@ def _run_unsupervised_detection(
 
         logger.info(f"[{task_id}] 检测完成，开始处理结果")
         ResourceMonitor.log_resource_status(f"检测完成，处理结果 [{task_id}]")
+
+        # 第三步：检查停止标志
+        if task_manager.is_stop_requested(task_id):
+            logger.info(f"[{task_id}] 检测任务被停止（检测完成后）")
+            task_manager.cancel_task(task_id, "用户停止")
+            return
+
         task_manager.update_progress(task_id, 90, "处理结果中")
 
         # 保存检测结果

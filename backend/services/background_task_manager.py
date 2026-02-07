@@ -35,6 +35,8 @@ class BackgroundTaskManager:
         self.tasks: Dict[str, Dict[str, Any]] = {}
         self.progress_timestamps: Dict[str, float] = {}  # 记录进度最后更新时间
         self.active_threads: Dict[str, threading.Thread] = {}  # 跟踪活动线程
+        self.active_processes: Dict[str, Any] = {}  # 跟踪活动进程（multiprocessing.Process或Pool）
+        self.task_stop_flags: Dict[str, threading.Event] = {}  # 任务停止标志
         self._shutdown_flag = threading.Event()  # 关闭协调标志
         # 初始化持久化存储
         self.storage = TaskStorage()
@@ -207,6 +209,124 @@ class BackgroundTaskManager:
         logger.info(f"任务已取消: {task_id} - {reason}")
         # 持久化任务
         self.storage.save_task(self.tasks[task_id])
+        return True
+
+    def register_thread(self, task_id: str, thread: threading.Thread) -> None:
+        """
+        注册任务的线程句柄
+
+        Args:
+            task_id: 任务ID
+            thread: 线程对象
+        """
+        self.active_threads[task_id] = thread
+        logger.info(f"[THREAD_REGISTERED] taskId={task_id}, threadName={thread.name}")
+
+    def register_process(self, task_id: str, process: Any) -> None:
+        """
+        注册任务的进程句柄
+
+        Args:
+            task_id: 任务ID
+            process: 进程对象（multiprocessing.Process或Pool）
+        """
+        self.active_processes[task_id] = process
+        logger.info(f"[PROCESS_REGISTERED] taskId={task_id}, processType={type(process).__name__}")
+
+    def get_stop_flag(self, task_id: str) -> threading.Event:
+        """
+        获取任务的停止标志
+
+        Args:
+            task_id: 任务ID
+
+        Returns:
+            停止标志事件对象
+        """
+        if task_id not in self.task_stop_flags:
+            self.task_stop_flags[task_id] = threading.Event()
+        return self.task_stop_flags[task_id]
+
+    def set_stop_flag(self, task_id: str) -> None:
+        """
+        设置任务的停止标志
+
+        Args:
+            task_id: 任务ID
+        """
+        stop_flag = self.get_stop_flag(task_id)
+        stop_flag.set()
+        logger.info(f"[STOP_FLAG_SET] taskId={task_id}")
+
+    def is_stop_requested(self, task_id: str) -> bool:
+        """
+        检查是否请求停止任务
+
+        Args:
+            task_id: 任务ID
+
+        Returns:
+            是否请求停止
+        """
+        stop_flag = self.get_stop_flag(task_id)
+        return stop_flag.is_set()
+
+    def force_terminate_task(self, task_id: str) -> bool:
+        """
+        强制终止任务（包括线程和进程）
+
+        Args:
+            task_id: 任务ID
+
+        Returns:
+            是否成功
+        """
+        logger.info(f"[FORCE_TERMINATE_START] taskId={task_id}")
+
+        # 第一步：设置停止标志
+        self.set_stop_flag(task_id)
+
+        # 第二步：终止线程
+        if task_id in self.active_threads:
+            thread = self.active_threads[task_id]
+            if thread.is_alive():
+                logger.warning(f"[THREAD_FORCE_TERMINATE] taskId={task_id}, threadName={thread.name}")
+                # 等待线程自然退出（通过stop_flag）
+                thread.join(timeout=5)
+                if thread.is_alive():
+                    logger.warning(f"[THREAD_STILL_ALIVE] taskId={task_id}, threadName={thread.name}")
+            del self.active_threads[task_id]
+
+        # 第三步：终止进程
+        if task_id in self.active_processes:
+            process = self.active_processes[task_id]
+            process_type = type(process).__name__
+
+            try:
+                if process_type == "Pool":
+                    # multiprocessing.Pool
+                    logger.warning(f"[POOL_FORCE_TERMINATE] taskId={task_id}")
+                    process.terminate()
+                    process.join(timeout=5)
+                elif hasattr(process, "terminate"):
+                    # multiprocessing.Process
+                    logger.warning(f"[PROCESS_FORCE_TERMINATE] taskId={task_id}")
+                    process.terminate()
+                    process.join(timeout=5)
+                    if process.is_alive():
+                        logger.error(f"[PROCESS_KILL] taskId={task_id}")
+                        process.kill()
+                        process.join(timeout=2)
+            except Exception as e:
+                logger.error(f"[PROCESS_TERMINATE_ERROR] taskId={task_id}, error={str(e)}")
+
+            del self.active_processes[task_id]
+
+        # 第四步：标记任务为已取消
+        if task_id in self.tasks:
+            self.cancel_task(task_id, "任务被强制终止")
+
+        logger.info(f"[FORCE_TERMINATE_COMPLETE] taskId={task_id}")
         return True
 
     def get_task_status(self, task_id: str, stuck_threshold: int = 30) -> Optional[Dict[str, Any]]:
@@ -612,23 +732,55 @@ class BackgroundTaskManager:
 
     def shutdown(self, timeout: int = 60) -> None:
         """
-        关闭任务管理器，等待所有活动线程完成
+        关闭任务管理器，等待所有活动线程和进程完成
 
         Args:
             timeout: 等待超时时间（秒）
         """
-        logger.info(f"开始关闭任务管理器，活动线程数: {len(self.active_threads)}")
+        logger.info(f"[SHUTDOWN_START] activeThreads={len(self.active_threads)}, activeProcesses={len(self.active_processes)}")
         self._shutdown_flag.set()
 
-        # 等待所有线程完成
+        # 第一步：设置所有运行中任务的停止标志
+        for task_id in list(self.task_stop_flags.keys()):
+            task = self.tasks.get(task_id)
+            if task and task["status"] == TaskStatus.RUNNING:
+                logger.info(f"[SHUTDOWN_SET_STOP_FLAG] taskId={task_id}")
+                self.set_stop_flag(task_id)
+
+        # 第二步：等待所有线程完成
+        remaining_timeout = timeout
         for task_id, thread in list(self.active_threads.items()):
             if thread.is_alive():
-                logger.info(f"等待线程完成: {thread.name}")
-                thread.join(timeout=timeout)
+                logger.info(f"[SHUTDOWN_WAIT_THREAD] taskId={task_id}, threadName={thread.name}")
+                thread.join(timeout=remaining_timeout)
                 if thread.is_alive():
-                    logger.warning(f"线程未在超时内完成: {thread.name}")
+                    logger.warning(f"[SHUTDOWN_THREAD_TIMEOUT] taskId={task_id}, threadName={thread.name}")
+                else:
+                    logger.info(f"[SHUTDOWN_THREAD_COMPLETE] taskId={task_id}")
+                remaining_timeout = max(5, remaining_timeout - 10)
 
-        logger.info("任务管理器关闭完成")
+        # 第三步：等待所有进程完成
+        for task_id, process in list(self.active_processes.items()):
+            process_type = type(process).__name__
+            try:
+                if process_type == "Pool":
+                    logger.info(f"[SHUTDOWN_CLOSE_POOL] taskId={task_id}")
+                    process.close()
+                    process.join(timeout=remaining_timeout)
+                elif hasattr(process, "is_alive") and process.is_alive():
+                    logger.info(f"[SHUTDOWN_WAIT_PROCESS] taskId={task_id}")
+                    process.join(timeout=remaining_timeout)
+                    if process.is_alive():
+                        logger.warning(f"[SHUTDOWN_PROCESS_TIMEOUT] taskId={task_id}")
+                        process.terminate()
+                        process.join(timeout=5)
+                        if process.is_alive():
+                            logger.error(f"[SHUTDOWN_PROCESS_KILL] taskId={task_id}")
+                            process.kill()
+            except Exception as e:
+                logger.error(f"[SHUTDOWN_PROCESS_ERROR] taskId={task_id}, error={str(e)}")
+
+        logger.info(f"[SHUTDOWN_COMPLETE] remainingThreads={len([t for t in self.active_threads.values() if t.is_alive()])}")
 
 
 # 全局任务管理器实例

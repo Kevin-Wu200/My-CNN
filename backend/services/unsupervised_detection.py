@@ -633,6 +633,11 @@ class UnsupervisedDiseaseDetectionService:
                 logger.info(f"[{task_id}] 使用并行处理分块，工作进程数={num_workers}")
                 ResourceMonitor.log_resource_status(f"并行处理分块开始 [{task_id}]")
 
+                # 检查停止标志
+                if task_manager and task_manager.is_stop_requested(task_id):
+                    logger.info(f"[{task_id}] 检测任务被停止（并行处理前）")
+                    return False, None, "检测任务被用户停止"
+
                 # 为每个瓦片准备参数元组
                 tile_args = [
                     (self, tile, n_clusters, min_area, nodata_value)
@@ -645,6 +650,8 @@ class UnsupervisedDiseaseDetectionService:
                         _process_tile_for_parallel,
                         num_workers=num_workers,
                         error_handling="log",
+                        task_manager=task_manager,
+                        task_id=task_id,
                     )
                 )
 
@@ -669,6 +676,11 @@ class UnsupervisedDiseaseDetectionService:
                 logger.info(f"[{task_id}] 使用顺序处理分块")
                 valid_results = []
                 for tile_idx, tile in enumerate(tiles):
+                    # 检查停止标志
+                    if task_manager and task_manager.is_stop_requested(task_id):
+                        logger.info(f"[{task_id}] 检测任务被停止（分块处理中，已处理 {tile_idx}/{len(tiles)} 个分块）")
+                        return False, None, "检测任务被用户停止"
+
                     logger.debug(f"[{task_id}] 处理分块 {tile_idx + 1}/{len(tiles)}")
                     success, result, msg = self._process_single_tile(
                         tile, n_clusters, min_area, nodata_value
@@ -677,6 +689,11 @@ class UnsupervisedDiseaseDetectionService:
                         valid_results.append(result)
                     else:
                         logger.error(f"[{task_id}] 分块 {tile.tile_index} 处理失败: {msg}")
+
+                    # 更新进度
+                    if task_manager and task_id:
+                        progress = 30 + int((tile_idx / len(tiles)) * 30)
+                        task_manager.update_progress(task_id, progress, f"处理分块中: {tile_idx + 1}/{len(tiles)}")
 
             if not valid_results:
                 logger.error(f"[{task_id}] 所有分块处理失败")
@@ -779,6 +796,11 @@ class UnsupervisedDiseaseDetectionService:
                 logger.error(f"[{task_id}] 影像归一化失败: {msg}")
                 return False, None, msg
 
+            # 检查停止标志
+            if task_manager and task_manager.is_stop_requested(task_id):
+                logger.info(f"[{task_id}] 检测任务被停止（影像归一化后）")
+                return False, None, "检测任务被用户停止"
+
             # 第二步和第三步：特征构建与标准化
             logger.debug(f"[{task_id}] 第二步和第三步: 特征构建与标准化")
             success, feature_matrix, msg = self.construct_feature_matrix(
@@ -788,6 +810,11 @@ class UnsupervisedDiseaseDetectionService:
                 logger.error(f"[{task_id}] 特征构建失败: {msg}")
                 return False, None, msg
 
+            # 检查停止标志
+            if task_manager and task_manager.is_stop_requested(task_id):
+                logger.info(f"[{task_id}] 检测任务被停止（特征构建后）")
+                return False, None, "检测任务被用户停止"
+
             # 第四步：K-means 聚类
             logger.debug(f"[{task_id}] 第四步: K-means 聚类")
             success, labels, centers, msg = self.kmeans_clustering(
@@ -796,6 +823,11 @@ class UnsupervisedDiseaseDetectionService:
             if not success:
                 logger.error(f"[{task_id}] K-means 聚类失败: {msg}")
                 return False, None, msg
+
+            # 检查停止标志
+            if task_manager and task_manager.is_stop_requested(task_id):
+                logger.info(f"[{task_id}] 检测任务被停止（K-means聚类后）")
+                return False, None, "检测任务被用户停止"
 
             # 提取光谱特征用于候选类别判定
             logger.debug(f"[{task_id}] 提取光谱特征")
@@ -814,6 +846,11 @@ class UnsupervisedDiseaseDetectionService:
             if not success:
                 logger.error(f"[{task_id}] 候选类别判定失败: {msg}")
                 return False, None, msg
+
+            # 检查停止标志
+            if task_manager and task_manager.is_stop_requested(task_id):
+                logger.info(f"[{task_id}] 检测任务被停止（候选类别判定后）")
+                return False, None, "检测任务被用户停止"
 
             # 第六步：空间后处理
             logger.debug(f"[{task_id}] 第六步: 空间后处理")
