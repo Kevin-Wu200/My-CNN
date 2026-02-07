@@ -403,7 +403,6 @@ if __name__ == "__main__":
             port=8000,
             reload=DEV_MODE,
             timeout_keep_alive=43200,  # 12小时 keep-alive 超时
-            timeout_notify=43200,  # 12小时 shutdown 通知超时
         )
     except KeyboardInterrupt:
         logger.info("捕获到 KeyboardInterrupt，服务正在关闭...")
