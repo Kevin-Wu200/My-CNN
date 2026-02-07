@@ -46,12 +46,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册路由
-app.include_router(training_router)
-app.include_router(detection_config_router)
-app.include_router(unsupervised_router)
-app.include_router(upload_router)
-app.include_router(task_status_router)
+# 注册路由 - 添加 /api 前缀以匹配前端期望的API路由
+app.include_router(training_router, prefix="/api")
+app.include_router(detection_config_router, prefix="/api")
+app.include_router(unsupervised_router, prefix="/api")
+app.include_router(upload_router, prefix="/api")
+app.include_router(task_status_router, prefix="/api")
 
 
 # ==================== 优雅关闭信号处理 ====================
