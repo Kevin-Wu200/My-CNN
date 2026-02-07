@@ -313,6 +313,47 @@ async function uploadChunkWithRetry(uploadId: string, chunkIndex: number) {
 }
 
 /**
+ * 轮询查询上传状态直到获得 filePath
+ * 第九步：前端禁止在 filePath 未返回前发起任何文件就绪检查或检测请求
+ */
+async function pollUploadStatus(uploadId: string, maxRetries: number = 120, retryInterval: number = 1000): Promise<string> {
+  let retries = 0
+
+  while (retries < maxRetries) {
+    try {
+      const response = await fetch(`/api/upload/status/${uploadId}`)
+
+      if (!response.ok) {
+        throw new Error(`查询状态失败: ${response.statusText}`)
+      }
+
+      const statusData = await response.json()
+
+      // 检查状态是否为 completed
+      if (statusData.status === 'completed' && statusData.filePath) {
+        console.log(`[UploadWorker] 上传完成，获得 filePath: ${statusData.filePath}`)
+        return statusData.filePath
+      }
+
+      // 检查是否失败
+      if (statusData.status === 'failed') {
+        throw new Error(`上传失败: ${statusData.errorMessage || '未知错误'}`)
+      }
+
+      // 继续轮询
+      retries++
+      await new Promise(resolve => setTimeout(resolve, retryInterval))
+    } catch (error: any) {
+      console.error(`[UploadWorker] 查询状态异常 (重试 ${retries}/${maxRetries}):`, error.message)
+      retries++
+      await new Promise(resolve => setTimeout(resolve, retryInterval))
+    }
+  }
+
+  throw new Error(`轮询超时：无法获得 filePath (已重试 ${maxRetries} 次)`)
+}
+
+/**
  * 完成上传
  */
 async function completeUpload(uploadId: string) {
@@ -336,8 +377,12 @@ async function completeUpload(uploadId: string) {
       throw new Error(errorData.detail || `上传完成失败: ${response.statusText}`)
     }
 
-    const result = await response.json()
-    sendSuccess(uploadId, result.file_path, task.file.name, task.file.size, task.totalChunks)
+    // 第九步：前端禁止在 filePath 未返回前发起任何文件就绪检查或检测请求
+    // 轮询查询上传状态直到获得 filePath
+    console.log(`[UploadWorker] 开始轮询查询上传状态: ${uploadId}`)
+    const filePath = await pollUploadStatus(uploadId)
+
+    sendSuccess(uploadId, filePath, task.file.name, task.file.size, task.totalChunks)
     uploadTasks.delete(uploadId)
   } catch (error: any) {
     sendError(uploadId, UPLOAD_ERROR_CODES.UNKNOWN_ERROR, `上传完成失败: ${error.message}`)

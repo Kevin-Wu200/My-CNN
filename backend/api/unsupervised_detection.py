@@ -179,6 +179,14 @@ async def detect_disease(
     try:
         logger.info(f"[API] 收到无监督检测请求: image_path={image_path}, n_clusters={n_clusters}, min_area={min_area}")
 
+        # 第八步：禁止接受 image_path=undefined，参数缺失直接返回 400 并记录错误来源
+        if not image_path or image_path.strip() == "" or image_path == "undefined":
+            logger.error(f"[API] 参数验证失败: image_path 缺失或无效 (image_path={image_path})")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="参数错误: image_path 不能为空或 undefined",
+            )
+
         # 步骤6: 在任何检测/分类逻辑开始前，强制检查文件状态是否为"已合并完成"
         is_ready, error_msg = check_file_readiness(image_path)
         if not is_ready:
