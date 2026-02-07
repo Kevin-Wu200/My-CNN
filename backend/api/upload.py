@@ -33,14 +33,15 @@ router = APIRouter(prefix="/upload", tags=["upload"])
 db_manager = get_db_manager()
 
 # 步骤7: 限制 /upload/chunk 的并发或频率
-# 使用简单的速率限制：每个 uploadId 在 1 秒内最多接收 100 个请求
-# 注意：前端使用8个并行worker上传，所以需要足够大的限制值
+# 使用简单的速率限制：每个 uploadId 在 1 秒内最多接收 50 个请求
+# 前端已降低并发数至2，所以后端限制也相应降低
 class RateLimiter:
     """简单的速率限制器"""
-    def __init__(self, max_requests: int = 100, window_seconds: int = 1):
+    def __init__(self, max_requests: int = 50, window_seconds: int = 1):
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self.requests: Dict[str, list] = defaultdict(list)
+        self.rejected_requests: Dict[str, int] = defaultdict(int)  # 记录被拒绝的请求数
 
     def is_allowed(self, key: str) -> bool:
         """检查是否允许请求"""
@@ -50,16 +51,18 @@ class RateLimiter:
                               if now - req_time < self.window_seconds]
 
         if len(self.requests[key]) >= self.max_requests:
+            self.rejected_requests[key] += 1
             logger.warning(
-                f"[RATE_LIMIT_WARNING] uploadId={key}, "
-                f"requests={len(self.requests[key])}, max={self.max_requests}"
+                f"[RATE_LIMIT_EXCEEDED] uploadId={key}, "
+                f"requests={len(self.requests[key])}, max={self.max_requests}, "
+                f"total_rejected={self.rejected_requests[key]}"
             )
             return False
 
         self.requests[key].append(now)
         return True
 
-chunk_rate_limiter = RateLimiter(max_requests=100, window_seconds=1)
+chunk_rate_limiter = RateLimiter(max_requests=50, window_seconds=1)
 
 
 class CompleteUploadRequest(BaseModel):
@@ -123,8 +126,10 @@ async def upload_chunk(
     try:
         # 步骤7: 限制并发或频率
         if not chunk_rate_limiter.is_allowed(uploadId):
+            # 第六步：记录被拒绝的 chunk 请求日志
             logger.warning(
-                f"[RATE_LIMIT_EXCEEDED] uploadId={uploadId}, chunkIndex={chunkIndex}"
+                f"[CHUNK_REJECTED] uploadId={uploadId}, chunkIndex={chunkIndex}, "
+                f"reason=rate_limit_exceeded, totalChunks={totalChunks}, fileName={fileName}"
             )
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -152,13 +157,29 @@ async def upload_chunk(
         chunk_path = FilePathManager.get_chunk_path(uploadId, chunkIndex)
         chunk_content = await chunk.read()
 
-        with open(chunk_path, "wb") as f:
-            f.write(chunk_content)
+        # 第五步：确保后端不写入不完整数据
+        # 先写入临时文件，验证完整性后再重命名
+        temp_chunk_path = Path(str(chunk_path) + '.tmp')
+        try:
+            with open(temp_chunk_path, "wb") as f:
+                f.write(chunk_content)
+
+            # 验证临时文件大小
+            if temp_chunk_path.stat().st_size != len(chunk_content):
+                raise IOError(f"分片文件写入不完整: 期望 {len(chunk_content)} 字节，实际 {temp_chunk_path.stat().st_size} 字节")
+
+            # 重命名为正式文件
+            temp_chunk_path.replace(chunk_path)
+        except Exception as e:
+            # 清理临时文件
+            if temp_chunk_path.exists():
+                temp_chunk_path.unlink()
+            raise IOError(f"分片文件保存失败: {str(e)}")
 
         # 步骤8: 明确区分三类信息 - chunk 接收日志
         logger.info(
             f"[CHUNK_RECEIVED] uploadId={uploadId}, chunkIndex={chunkIndex}, "
-            f"chunkSize={len(chunk_content)}, fileName={fileName}"
+            f"chunkSize={len(chunk_content)}, fileName={fileName}, totalChunks={totalChunks}"
         )
 
         # 从数据库获取或创建会话
@@ -274,7 +295,7 @@ async def complete_upload(
             )
 
         # 步骤3: 当且仅当所有 chunk 接收完成后，才触发合并逻辑
-        # 验证所有分片是否已上传
+        # 第七步：在分片合并前，强制校验所有 chunk 均已成功上传
         uploaded_chunks_set = set(json.loads(upload_session.uploaded_chunks))
         uploaded_count = len(uploaded_chunks_set)
 
@@ -299,6 +320,23 @@ async def complete_upload(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"分片索引不连续",
+            )
+
+        # 第七步：验证所有分片文件是否物理存在
+        session_dir = FilePathManager.get_chunk_dir(uploadId)
+        missing_files = []
+        for chunk_idx in range(totalChunks):
+            chunk_path = FilePathManager.get_chunk_path(uploadId, chunk_idx)
+            if not chunk_path.exists():
+                missing_files.append(chunk_idx)
+
+        if missing_files:
+            logger.error(
+                f"[CHUNKS_FILES_MISSING] uploadId={uploadId}, missing_files={missing_files}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"分片文件缺失: {missing_files}",
             )
 
         # 步骤8: 明确区分三类信息 - chunk 接收完整日志

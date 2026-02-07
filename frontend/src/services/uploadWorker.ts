@@ -48,14 +48,17 @@ const UPLOAD_ERROR_CODES = {
   INVALID_INPUT: 'INVALID_INPUT',
   NETWORK_ERROR: 'NETWORK_ERROR',
   UNKNOWN_ERROR: 'UNKNOWN_ERROR',
+  RATE_LIMITED: 'RATE_LIMITED',
 } as const
 
 // ============ 常量配置 ============
 
 const CHUNK_SIZE = 5 * 1024 * 1024 // 5MB
-const MAX_CONCURRENT_UPLOADS = 4
-const CHUNK_RETRY_COUNT = 1
+const MAX_CONCURRENT_UPLOADS = 2 // 降低并发数，从4降至2
+const CHUNK_RETRY_COUNT = 3 // 增加重试次数
 const CHUNK_UPLOAD_TIMEOUT = 60000 // 60秒
+const RATE_LIMIT_BACKOFF_BASE = 1000 // 基础退避时间（毫秒）
+const RATE_LIMIT_BACKOFF_MAX = 30000 // 最大退避时间（毫秒）
 
 // ============ 上传任务状态 ============
 
@@ -69,6 +72,9 @@ interface UploadTask {
   failedChunks: Set<number>
   uploadingChunks: Set<number>
   chunkRetries: Map<number, number>
+  rateLimitedChunks: Set<number> // 被限流的分片
+  chunkBackoffTimes: Map<number, number> // 分片的退避时间
+  globalBackoffUntil: number // 全局退避截止时间
 }
 
 const uploadTasks = new Map<string, UploadTask>()
@@ -170,6 +176,14 @@ async function uploadChunk(
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}))
+
+      // 处理 429 Too Many Requests 错误
+      if (response.status === 429) {
+        const error = new Error(errorData.detail || '请求过于频繁')
+        (error as any).statusCode = 429
+        throw error
+      }
+
       throw new Error(errorData.detail || `分片上传失败: ${response.statusText}`)
     }
 
@@ -181,16 +195,27 @@ async function uploadChunk(
 }
 
 /**
- * 处理分片上传队列（并发控制）
+ * 处理分片上传队列（并发控制 + 退避策略）
  */
 async function processUploadQueue(uploadId: string) {
   const task = uploadTasks.get(uploadId)
   if (!task) return
 
+  // 检查全局退避是否仍在进行
+  if (task.globalBackoffUntil > Date.now()) {
+    // 仍在退避期间，延迟后重新尝试
+    setTimeout(() => processUploadQueue(uploadId), 500)
+    return
+  }
+
   const queue: number[] = []
   for (let i = 0; i < task.totalChunks; i++) {
     if (!task.failedChunks.has(i) && !task.uploadingChunks.has(i) && !task.uploadedChunkIndexes.has(i)) {
-      queue.push(i)
+      // 检查该分片是否在个别退避期间
+      const backoffUntil = task.chunkBackoffTimes.get(i) || 0
+      if (backoffUntil <= Date.now()) {
+        queue.push(i)
+      }
     }
   }
 
@@ -218,17 +243,39 @@ async function processUploadQueue(uploadId: string) {
       })
       .catch((error) => {
         task.uploadingChunks.delete(chunkIndex)
-        task.failedChunks.add(chunkIndex)
-        sendError(uploadId, UPLOAD_ERROR_CODES.CHUNK_RETRY_EXHAUSTED, error.message, chunkIndex)
 
-        // 如果失败分片过多（超过50%），中止上传
-        const failureRate = task.failedChunks.size / task.totalChunks
-        if (failureRate > 0.5) {
-          sendError(uploadId, UPLOAD_ERROR_CODES.CHUNK_UPLOAD_FAILED, `上传失败率过高 (${Math.round(failureRate * 100)}%)，已中止上传`)
-          uploadTasks.delete(uploadId)
+        // 检查是否是速率限制错误
+        if ((error as any).statusCode === 429) {
+          task.rateLimitedChunks.add(chunkIndex)
+          // 计算退避时间（指数退避）
+          const retries = task.chunkRetries.get(chunkIndex) || 0
+          const backoffTime = Math.min(
+            RATE_LIMIT_BACKOFF_BASE * Math.pow(2, retries),
+            RATE_LIMIT_BACKOFF_MAX
+          )
+          task.chunkBackoffTimes.set(chunkIndex, Date.now() + backoffTime)
+          console.warn(`[UploadWorker] 分片 ${chunkIndex} 被限流，${backoffTime}ms 后重试`)
+
+          // 设置全局退避，暂停所有上传
+          task.globalBackoffUntil = Date.now() + backoffTime
+          task.chunkRetries.set(chunkIndex, retries + 1)
+
+          // 延迟后继续处理队列
+          setTimeout(() => processUploadQueue(uploadId), backoffTime + 100)
         } else {
-          // 继续处理队列中的其他分片
-          processUploadQueue(uploadId)
+          // 非速率限制错误，标记为失败
+          task.failedChunks.add(chunkIndex)
+          sendError(uploadId, UPLOAD_ERROR_CODES.CHUNK_RETRY_EXHAUSTED, error.message, chunkIndex)
+
+          // 如果失败分片过多（超过50%），中止上传
+          const failureRate = task.failedChunks.size / task.totalChunks
+          if (failureRate > 0.5) {
+            sendError(uploadId, UPLOAD_ERROR_CODES.CHUNK_UPLOAD_FAILED, `上传失败率过高 (${Math.round(failureRate * 100)}%)，已中止上传`)
+            uploadTasks.delete(uploadId)
+          } else {
+            // 继续处理队列中的其他分片
+            processUploadQueue(uploadId)
+          }
         }
       })
   }
@@ -247,9 +294,16 @@ async function uploadChunkWithRetry(uploadId: string, chunkIndex: number) {
   try {
     await uploadChunk(uploadId, chunkIndex, chunk, task.file.name, task.file.size, task.totalChunks)
   } catch (error: any) {
+    // 速率限制错误直接抛出，由 processUploadQueue 处理
+    if ((error as any).statusCode === 429) {
+      throw error
+    }
+
+    // 其他错误进行重试
     if (retries < CHUNK_RETRY_COUNT) {
       task.chunkRetries.set(chunkIndex, retries + 1)
-      // 重试
+      // 延迟后重试
+      await new Promise(resolve => setTimeout(resolve, 500))
       return uploadChunkWithRetry(uploadId, chunkIndex)
     } else {
       // 重试次数已用尽
@@ -339,6 +393,9 @@ async function handleUpload(uploadId: string, data: any) {
     failedChunks: new Set(),
     uploadingChunks: new Set(),
     chunkRetries: new Map(),
+    rateLimitedChunks: new Set(),
+    chunkBackoffTimes: new Map(),
+    globalBackoffUntil: 0,
   }
 
   uploadTasks.set(uploadId, task)
