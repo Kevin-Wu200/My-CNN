@@ -239,6 +239,15 @@ class ParallelProcessingService:
                             f"分块 {tile_idx} 处理完成 "
                             f"(进度: {result_idx + 1}/{len(results)})"
                         )
+
+                        # 更新进度：30% -> 60% (结果收集阶段)
+                        if task_manager and task_id:
+                            progress = 30 + int((result_idx + 1) / len(results) * 30)
+                            task_manager.update_progress(
+                                task_id, progress,
+                                f"收集处理结果: {result_idx + 1}/{len(results)}"
+                            )
+
                         # 每完成10个分块记录一次资源状态
                         if (result_idx + 1) % 10 == 0:
                             ResourceMonitor.log_resource_status(f"分块完成进度 ({result_idx + 1}/{len(results)})")
