@@ -348,6 +348,8 @@ class UnsupervisedDiseaseDetectionService:
         Returns:
             (处理是否成功, 聚类标签, 聚类中心, 错误信息或成功消息)
         """
+        import warnings
+
         try:
             if feature_matrix is None or feature_matrix.size == 0:
                 return False, None, None, "特征矩阵为空"
@@ -362,10 +364,26 @@ class UnsupervisedDiseaseDetectionService:
                 )
                 return False, None, None, "特征矩阵包含无效值"
 
-            # 执行 K-means 聚类
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            labels = kmeans.fit_predict(feature_matrix)
-            centers = kmeans.cluster_centers_
+            # 额外的数值稳定性处理：裁剪到合理范围
+            # 避免极端值导致KMeans计算溢出
+            feature_matrix_clipped = np.clip(feature_matrix, -10, 10)
+
+            # 抑制sklearn的RuntimeWarning，因为我们已经做了充分的数值处理
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=RuntimeWarning)
+
+                # 执行 K-means 聚类
+                # 使用 'k-means++' 初始化方法提高稳定性
+                kmeans = KMeans(
+                    n_clusters=n_clusters,
+                    random_state=42,
+                    n_init=10,
+                    init='k-means++',
+                    max_iter=300,
+                    tol=1e-4
+                )
+                labels = kmeans.fit_predict(feature_matrix_clipped)
+                centers = kmeans.cluster_centers_
 
             self.kmeans = kmeans
 
