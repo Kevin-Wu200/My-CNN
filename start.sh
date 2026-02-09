@@ -137,6 +137,36 @@ case "$1" in
         ;;
 esac
 
+# 检查端口占用并清理
+check_and_cleanup_port() {
+    local port=$1
+    log_info "检查端口 $port 是否被占用..."
+
+    # 查找占用端口的进程
+    local pid=$(lsof -ti:$port)
+
+    if [ ! -z "$pid" ]; then
+        log_warning "端口 $port 已被进程 $pid 占用"
+        log_info "正在终止旧进程..."
+        kill -9 $pid 2>/dev/null || true
+        sleep 1
+
+        # 再次检查
+        pid=$(lsof -ti:$port)
+        if [ ! -z "$pid" ]; then
+            log_error "无法终止占用端口 $port 的进程 $pid"
+            log_error "请手动执行: kill -9 $pid"
+            exit 1
+        fi
+        log_success "端口 $port 已清理"
+    else
+        log_success "端口 $port 可用"
+    fi
+}
+
+# 清理端口 8000
+check_and_cleanup_port 8000
+
 # 启动后端服务
 log_info "启动后端服务..."
 log_info "后端地址: http://localhost:8000"
