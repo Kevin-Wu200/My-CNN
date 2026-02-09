@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Tuple, List
 
 # 添加项目路径
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from backend.utils.tile_utils import TilingService, DEFAULT_TILE_SIZE, Tile
 from backend.services.unsupervised_detection import UnsupervisedDiseaseDetectionService
