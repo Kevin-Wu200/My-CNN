@@ -21,6 +21,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { userStore } from '@/services/userStore'
 
 const route = useRoute()
 const router = useRouter()
@@ -30,10 +31,14 @@ const moduleTitle: Record<string, string> = {
   '/training/preprocess': '样本构建与预处理',
   '/training/model-config': '模型构建与参数配置',
   '/training/training': '模型训练',
+  '/detection/config-selection': '选择模型参数配置',
   '/detection/upload': '待检测影像上传',
   '/detection/result': '检测结果展示',
   '/detection/geojson': 'GeoJSON 修正与回流',
+  '/unsupervised/upload': '非监督病害木检测',
+  '/unsupervised/result': '检测结果',
   '/history': '历史任务管理',
+  '/task-progress': '任务进度',
 }
 
 const currentModuleTitle = computed(() => {
@@ -41,12 +46,18 @@ const currentModuleTitle = computed(() => {
 })
 
 const userName = computed(() => {
-  return localStorage.getItem('userName') || '用户'
+  const phone = userStore.getPhone()
+  if (phone) {
+    // 格式化手机号显示：138****0000
+    return phone.slice(0, 3) + '****' + phone.slice(7)
+  }
+  return '用户'
 })
 
 const handleLogout = () => {
-  localStorage.removeItem('userName')
-  localStorage.removeItem('token')
+  // 使用userStore的logout方法
+  userStore.logout()
+  // 跳转到登录页
   router.push('/login')
 }
 </script>

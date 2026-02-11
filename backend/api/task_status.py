@@ -80,3 +80,51 @@ async def get_tasks_by_status(status: str) -> Dict[str, Any]:
         "total": len(tasks),
         "tasks": tasks,
     }
+
+
+@router.post("/stop/{task_id}")
+async def stop_task(task_id: str) -> Dict[str, Any]:
+    """
+    停止正在运行的任务
+
+    Args:
+        task_id: 任务ID
+
+    Returns:
+        停止结果
+    """
+    # 检查任务是否存在
+    task = task_manager.get_task_status(task_id)
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"任务不存在: {task_id}",
+        )
+
+    # 检查任务状态
+    if task["status"] != "running":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"任务未在运行中，当前状态: {task['status']}",
+        )
+
+    try:
+        # 设置停止标志
+        task_manager.set_stop_flag(task_id)
+        logger.info(f"已设置任务停止标志: {task_id}")
+
+        # 强制终止任务
+        task_manager.force_terminate_task(task_id)
+        logger.info(f"已强制终止任务: {task_id}")
+
+        return {
+            "status": "stopped",
+            "task_id": task_id,
+            "message": "任务已终止",
+        }
+    except Exception as e:
+        logger.error(f"停止任务失败: {task_id}, 错误: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"停止任务失败: {str(e)}",
+        )

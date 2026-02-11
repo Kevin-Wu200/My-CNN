@@ -132,7 +132,7 @@ async function handleComputeTask(taskId: string, data: any): Promise<void> {
 }
 
 /**
- * 调用后端API执行无监督检测（异步）
+ * 调用后端API执行非监督检测（异步）
  * @param filePath 影像文件路径
  * @param nClusters K-means聚类数
  * @param minArea 最小斑块面积
@@ -169,9 +169,9 @@ async function startUnsupervisedDetection(
   } catch (error: any) {
     // 区分网络错误和其他错误
     if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
-      throw new Error(`启动无监督检测失败: 后端服务不可达（ECONNREFUSED）`)
+      throw new Error(`启动非监督检测失败: 后端服务不可达（ECONNREFUSED）`)
     }
-    throw new Error(`启动无监督检测失败: ${error.message}`)
+    throw new Error(`启动非监督检测失败: ${error.message}`)
   }
 }
 
@@ -210,7 +210,7 @@ async function pollTaskStatus(taskId: string): Promise<any> {
 }
 
 /**
- * 调用后端API执行无监督检测
+ * 调用后端API执行非监督检测
  * @param filePath 影像文件路径（由主线程上传后获得）
  * @param nClusters K-means聚类数
  * @param minArea 最小斑块面积
@@ -247,20 +247,20 @@ async function detectUnsupervisedDisease(
   } catch (error: any) {
     // 区分网络错误和其他错误
     if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
-      throw new Error(`无监督检测失败: 后端服务不可达（ECONNREFUSED）`)
+      throw new Error(`非监督检测失败: 后端服务不可达（ECONNREFUSED）`)
     }
-    throw new Error(`无监督检测失败: ${error.message}`)
+    throw new Error(`非监督检测失败: ${error.message}`)
   }
 }
 
 /**
- * 处理无监督分类任务
+ * 处理非监督分类任务
  * 在 Worker 线程中执行，不会被页面切换中断
  *
  * 【改进】
  * - 文件上传已在主线程完成，Worker 接收文件路径
  * - Worker 启动后台检测任务并轮询状态
- * - 真正执行无监督检测算法，而不是模拟逻辑
+ * - 真正执行非监督检测算法，而不是模拟逻辑
  */
 async function handleUnsupervisedTask(taskId: string, data: any): Promise<void> {
   try {
@@ -331,7 +331,7 @@ async function handleUnsupervisedTask(taskId: string, data: any): Promise<void> 
     sendError(
       taskId,
       ERROR_CODES.COMPUTATION_ERROR,
-      error.message || '无监督任务处理失败'
+      error.message || '非监督任务处理失败'
     )
   }
 }

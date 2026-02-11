@@ -136,7 +136,7 @@ const loadConfigs = async () => {
   try {
     loading.value = true
     errorMessage.value = ''
-    const response = await apiClient.get('/api/detection/model-configs')
+    const response = await apiClient.get('/detection/model-configs')
     configs.value = response.configs || []
   } catch (error: any) {
     errorMessage.value = error.message || '加载模型配置失败'

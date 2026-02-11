@@ -1,11 +1,19 @@
 import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router'
 import { taskManager } from '@/services/taskManager'
+import { userStore } from '@/services/userStore'
 import { INTERRUPT_TYPES } from '@/constants'
 
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
-    redirect: '/detection/config-selection',
+    redirect: () => {
+      return userStore.isLoggedIn() ? '/detection/config-selection' : '/login'
+    },
+  },
+  {
+    path: '/login',
+    component: () => import('@/pages/Login.vue'),
+    meta: { title: '用户登录', requiresAuth: false },
   },
   {
     path: '/task-progress',
@@ -71,7 +79,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'upload',
         component: () => import('@/pages/unsupervised/UnsupervisedUpload.vue'),
-        meta: { title: '无监督病害木检测' },
+        meta: { title: '非监督病害木检测' },
       },
       {
         path: 'result',
@@ -96,14 +104,32 @@ const router = createRouter({
 
 /**
  * 全局前置守卫
- * 在路由切换前检查是否有运行中的任务
+ * 1. 检查用户登录状态
+ * 2. 在路由切换前检查是否有运行中的任务
  * 如果有，则标记为前端假中断（路由切换导致的前端连接丢失）
  *
  * 【改进】现在任务在 Worker 中执行，路由切换不会中断任务
  * 但仍然标记状态以便追踪用户行为
  */
 router.beforeEach((to, from, next) => {
-  // 获取当前任务状态
+  // 第一步：检查登录状态
+  const isLoggedIn = userStore.isLoggedIn()
+
+  // 如果未登录且不是访问登录页，重定向到登录页
+  if (!isLoggedIn && to.path !== '/login') {
+    console.log('[Router] 用户未登录，重定向到登录页')
+    next('/login')
+    return
+  }
+
+  // 如果已登录且访问登录页，重定向到检测页面
+  if (isLoggedIn && to.path === '/login') {
+    console.log('[Router] 用户已登录，重定向到检测页面')
+    next('/detection/config-selection')
+    return
+  }
+
+  // 第二步：获取当前任务状态
   const currentTask = taskManager.getCurrentTask()
 
   // 如果有运行中的任务且路由发生变化，标记为前端假中断

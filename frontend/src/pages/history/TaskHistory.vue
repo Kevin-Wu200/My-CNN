@@ -70,40 +70,70 @@ import Card from '@/components/common/Card.vue'
 import Button from '@/components/common/Button.vue'
 import type { TrainingTask, DetectionTask } from '@/types'
 import { apiClient } from '@/services/api'
+import { userStore } from '@/services/userStore'
 
-const trainingTasks = ref<TrainingTask[]>([
-  {
-    id: '1',
-    name: '训练任务 - 2024年样本集',
-    status: 'completed',
-    createdAt: '2024-01-15 10:30',
-    updatedAt: '2024-01-15 14:45',
-  },
-  {
-    id: '2',
-    name: '训练任务 - 2023年样本集',
-    status: 'completed',
-    createdAt: '2024-01-10 09:00',
-    updatedAt: '2024-01-10 12:30',
-  },
-])
+const trainingTasks = ref<TrainingTask[]>([])
+const detectionTasks = ref<DetectionTask[]>([])
+const isLoading = ref(false)
+const error = ref('')
 
-const detectionTasks = ref<DetectionTask[]>([
-  {
-    id: '1',
-    name: '检测任务 - 区域A',
-    status: 'completed',
-    createdAt: '2024-01-20 11:00',
-    updatedAt: '2024-01-20 11:45',
-  },
-  {
-    id: '2',
-    name: '检测任务 - 区域B',
-    status: 'completed',
-    createdAt: '2024-01-18 14:30',
-    updatedAt: '2024-01-18 15:20',
-  },
-])
+/**
+ * 加载训练历史
+ */
+const loadTrainingHistory = async () => {
+  try {
+    const userId = userStore.getUserId()
+    if (!userId) {
+      console.warn('用户未登录，无法加载训练历史')
+      return
+    }
+
+    const response = await apiClient.get(`/history/training/${userId}`)
+
+    if (response.success && response.data) {
+      // 映射后端数据到前端格式
+      trainingTasks.value = response.data.map((task: any) => ({
+        id: task.id.toString(),
+        name: task.task_name,
+        status: task.status,
+        createdAt: formatDate(task.created_at),
+        updatedAt: task.completed_at ? formatDate(task.completed_at) : formatDate(task.created_at),
+      }))
+    }
+  } catch (e: any) {
+    console.error('加载训练历史失败:', e)
+    error.value = '加载训练历史失败'
+  }
+}
+
+/**
+ * 加载检测历史
+ */
+const loadDetectionHistory = async () => {
+  try {
+    const userId = userStore.getUserId()
+    if (!userId) {
+      console.warn('用户未登录，无法加载检测历史')
+      return
+    }
+
+    const response = await apiClient.get(`/history/detection/${userId}`)
+
+    if (response.success && response.data) {
+      // 映射后端数据到前端格式
+      detectionTasks.value = response.data.map((task: any) => ({
+        id: task.id.toString(),
+        name: task.task_name,
+        status: task.status,
+        createdAt: formatDate(task.created_at),
+        updatedAt: task.completed_at ? formatDate(task.completed_at) : formatDate(task.created_at),
+      }))
+    }
+  } catch (e: any) {
+    console.error('加载检测历史失败:', e)
+    error.value = '加载检测历史失败'
+  }
+}
 
 const formatStatus = (status: string): string => {
   const statusMap: Record<string, string> = {
@@ -116,7 +146,20 @@ const formatStatus = (status: string): string => {
 }
 
 const formatDate = (dateStr: string): string => {
-  return dateStr
+  if (!dateStr) return ''
+
+  try {
+    const date = new Date(dateStr)
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    const hours = String(date.getHours()).padStart(2, '0')
+    const minutes = String(date.getMinutes()).padStart(2, '0')
+
+    return `${year}-${month}-${day} ${hours}:${minutes}`
+  } catch (e) {
+    return dateStr
+  }
 }
 
 const viewTaskDetail = (taskId: string) => {
@@ -127,8 +170,20 @@ const exportTask = (taskId: string) => {
   console.log('导出任务结果:', taskId)
 }
 
-onMounted(() => {
-  // 可以在这里加载历史任务数据
+onMounted(async () => {
+  isLoading.value = true
+  error.value = ''
+
+  try {
+    await Promise.all([
+      loadTrainingHistory(),
+      loadDetectionHistory()
+    ])
+  } catch (e) {
+    console.error('加载历史任务失败:', e)
+  } finally {
+    isLoading.value = false
+  }
 })
 </script>
 

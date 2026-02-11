@@ -10,7 +10,7 @@
     />
     <Card class="upload-card">
       <div class="card-header">
-        <h2>无监督病害木检测</h2>
+        <h2>非监督病害木检测</h2>
         <p class="description">基于光谱、纹理和空间特征的传统非监督分类方法，无需深度学习模型和人工标注</p>
       </div>
 

@@ -2,7 +2,7 @@ export const unsupervisedRoutes = [
   {
     path: 'upload',
     component: () => import('./UnsupervisedUpload.vue'),
-    meta: { title: '无监督病害木检测' },
+    meta: { title: '非监督病害木检测' },
   },
   {
     path: 'result',

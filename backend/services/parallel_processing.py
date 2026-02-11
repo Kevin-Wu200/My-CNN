@@ -5,13 +5,12 @@
 """
 
 import multiprocessing as mp
-from multiprocessing import Pool, Manager
+from multiprocessing import Pool
 from pathlib import Path
 from typing import Tuple, Optional, List, Callable, Dict, Any
 import logging
 import time
 import os
-import signal
 
 from backend.utils.resource_monitor import ResourceMonitor
 

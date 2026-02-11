@@ -5,7 +5,7 @@
  * 以及如何在 Vue 组件中调用 TaskManager 启动上传任务
  */
 
-// ============ 示例 1: 在 Vue 组件中启动无监督检测任务 ============
+// ============ 示例 1: 在 Vue 组件中启动非监督检测任务 ============
 
 import { taskManager } from '@/services/taskManager'
 
@@ -15,7 +15,7 @@ export default {
       const file = this.selectedFile // File 对象
 
       try {
-        // 启动无监督检测任务
+        // 启动非监督检测任务
         // TaskManager 内部会自动使用 uploadManager 进行分片上传
         const taskId = await taskManager.startUnsupervisedTask(file, {
           nClusters: 4,

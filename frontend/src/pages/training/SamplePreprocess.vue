@@ -7,7 +7,10 @@
 
       <div class="status-section">
         <h3 class="section-title">多时相影像读取状态</h3>
-        <div class="status-list">
+        <div v-if="imageStatus.length === 0" class="empty-state">
+          <p class="empty-message">暂无影像文件</p>
+        </div>
+        <div v-else class="status-list">
           <div v-for="image in imageStatus" :key="image.id" class="status-item">
             <div class="status-indicator" :class="image.status" />
             <div class="status-info">
@@ -69,11 +72,7 @@ import Button from '@/components/common/Button.vue'
 const router = useRouter()
 const buildMethod = ref('pixel')
 
-const imageStatus = ref([
-  { id: 1, name: '2020年影像', status: 'completed', detail: '已读取，分辨率 512×512' },
-  { id: 2, name: '2021年影像', status: 'completed', detail: '已读取，分辨率 512×512' },
-  { id: 3, name: '2022年影像', status: 'completed', detail: '已读取，分辨率 512×512' },
-])
+const imageStatus = ref([])
 
 const goToPreviousStep = () => {
   router.push('/training/upload')
@@ -117,6 +116,19 @@ const goToNextStep = () => {
   font-weight: 600;
   color: #333;
   margin: 0 0 16px 0;
+}
+
+.empty-state {
+  padding: 40px 20px;
+  text-align: center;
+  background-color: #f9f9f9;
+  border-radius: 8px;
+}
+
+.empty-message {
+  font-size: 14px;
+  color: #999;
+  margin: 0;
 }
 
 .status-list {

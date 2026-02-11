@@ -31,34 +31,60 @@ class UserManagementService:
         """
         self.db_manager = db_manager
 
-    def register_user(self, username: str) -> Tuple[bool, Optional[int], str]:
+    def validate_phone(self, phone: str) -> Tuple[bool, str]:
         """
-        注册新用户
+        校验手机号格式
 
         Args:
-            username: 用户名
+            phone: 手机号
+
+        Returns:
+            (是否有效, 错误信息)
+        """
+        if not phone:
+            return False, "手机号不能为空"
+
+        if not phone.isdigit():
+            return False, "手机号只能包含数字"
+
+        if len(phone) != 11:
+            return False, "手机号必须是11位"
+
+        return True, ""
+
+    def register_user(self, phone: str) -> Tuple[bool, Optional[int], str]:
+        """
+        注册新用户（使用手机号）
+
+        Args:
+            phone: 手机号（11位）
 
         Returns:
             (注册是否成功, 用户 ID, 错误信息或成功消息)
         """
         try:
+            # 校验手机号格式
+            is_valid, error_msg = self.validate_phone(phone)
+            if not is_valid:
+                return False, None, error_msg
+
             session = self.db_manager.get_session()
 
-            # 检查用户是否已存在
-            existing_user = session.query(User).filter_by(username=username).first()
+            # 检查手机号是否已存在
+            existing_user = session.query(User).filter_by(phone=phone).first()
             if existing_user:
                 session.close()
-                return False, None, f"用户已存在: {username}"
+                return False, None, f"手机号已注册: {phone}"
 
             # 创建新用户
-            new_user = User(username=username)
+            new_user = User(phone=phone)
             session.add(new_user)
             session.commit()
 
             user_id = new_user.id
             session.close()
 
-            logger.info(f"用户注册成功: {username} (ID: {user_id})")
+            logger.info(f"用户注册成功: {phone} (ID: {user_id})")
 
             return True, user_id, "用户注册成功"
 
@@ -66,35 +92,44 @@ class UserManagementService:
             logger.error(f"用户注册失败: {str(e)}")
             return False, None, f"用户注册失败: {str(e)}"
 
-    def login_user(self, username: str) -> Tuple[bool, Optional[int], str]:
+    def login_user(self, phone: str) -> Tuple[bool, Optional[int], str]:
         """
-        用户登录
+        用户登录（使用手机号，不存在则自动注册）
 
         Args:
-            username: 用户名
+            phone: 手机号（11位）
 
         Returns:
             (登录是否成功, 用户 ID, 错误信息或成功消息)
         """
         try:
+            # 校验手机号格式
+            is_valid, error_msg = self.validate_phone(phone)
+            if not is_valid:
+                return False, None, error_msg
+
             session = self.db_manager.get_session()
 
             # 查找用户
-            user = session.query(User).filter_by(username=username).first()
-            if not user:
-                session.close()
-                return False, None, f"用户不存在: {username}"
+            user = session.query(User).filter_by(phone=phone).first()
 
-            # 更新最后登录时间
-            user.last_login = datetime.now()
-            session.commit()
+            if not user:
+                # 用户不存在，自动注册
+                user = User(phone=phone)
+                session.add(user)
+                session.commit()
+                logger.info(f"新用户自动注册: {phone} (ID: {user.id})")
+            else:
+                # 更新最后登录时间
+                user.last_login = datetime.now()
+                session.commit()
 
             user_id = user.id
             session.close()
 
-            logger.info(f"用户登录成功: {username} (ID: {user_id})")
+            logger.info(f"用户登录成功: {phone} (ID: {user_id})")
 
-            return True, user_id, "用户登录成功"
+            return True, user_id, "登录成功"
 
         except Exception as e:
             logger.error(f"用户登录失败: {str(e)}")
@@ -120,6 +155,7 @@ class UserManagementService:
 
             user_info = {
                 "id": user.id,
+                "phone": user.phone,
                 "username": user.username,
                 "created_at": user.created_at.isoformat(),
                 "last_login": user.last_login.isoformat() if user.last_login else None,

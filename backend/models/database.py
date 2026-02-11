@@ -23,12 +23,13 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True)
-    username = Column(String(100), unique=True, nullable=False, index=True)
+    phone = Column(String(11), unique=True, nullable=False, index=True)
+    username = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.now)
     last_login = Column(DateTime, default=datetime.now)
 
     def __repr__(self):
-        return f"<User(id={self.id}, username={self.username})>"
+        return f"<User(id={self.id}, phone={self.phone})>"
 
 
 class TrainingTask(Base):

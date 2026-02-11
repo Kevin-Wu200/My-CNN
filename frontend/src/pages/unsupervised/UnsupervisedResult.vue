@@ -3,7 +3,7 @@
     <Card class="result-card">
       <div class="card-header">
         <h2>检测结果</h2>
-        <p class="description">无监督病害木检测结果展示</p>
+        <p class="description">非监督病害木检测结果展示</p>
       </div>
 
       <div v-if="detectionResult" class="result-content">

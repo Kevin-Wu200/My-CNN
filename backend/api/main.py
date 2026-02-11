@@ -19,6 +19,7 @@ from backend.api.detection_config import router as detection_config_router
 from backend.api.unsupervised_detection import router as unsupervised_router
 from backend.api.upload import router as upload_router
 from backend.api.task_status import router as task_status_router
+from backend.api.user_auth import router as user_auth_router
 from backend.utils.logger import LoggerSetup
 from backend.utils.thread_limiter import limit_numerical_library_threads, log_thread_configuration
 from backend.config.settings import NUMERICAL_LIBRARY_THREADS
@@ -52,6 +53,7 @@ app.include_router(detection_config_router, prefix="/api")
 app.include_router(unsupervised_router, prefix="/api")
 app.include_router(upload_router, prefix="/api")
 app.include_router(task_status_router, prefix="/api")
+app.include_router(user_auth_router, prefix="/api")
 
 
 # ==================== 优雅关闭信号处理 ====================

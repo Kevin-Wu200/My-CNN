@@ -55,6 +55,16 @@
             <span class="detail-value">{{ formatTime(currentTask.createdAt) }}</span>
           </div>
         </div>
+
+        <div class="action-buttons">
+          <Button
+            variant="danger"
+            @click="showStopConfirm = true"
+            :disabled="isStopping"
+          >
+            {{ isStopping ? '终止中...' : '终止任务' }}
+          </Button>
+        </div>
       </div>
 
       <!-- 任务已完成 -->
@@ -90,6 +100,44 @@
           <Button variant="primary" @click="navigateToResult">
             查看结果
           </Button>
+          <Button variant="secondary" @click="clearTask">
+            清除任务
+          </Button>
+        </div>
+      </div>
+
+      <!-- 任务已取消 -->
+      <div v-else-if="currentTask.status === 'cancelled'" class="task-cancelled">
+        <div class="status-icon warning">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="15" y1="9" x2="9" y2="15" />
+            <line x1="9" y1="9" x2="15" y2="15" />
+          </svg>
+        </div>
+        <h3 class="status-title">任务已取消</h3>
+        <p class="status-message">任务已被用户手动终止</p>
+
+        <div class="task-details">
+          <div class="detail-item">
+            <span class="detail-label">任务类型</span>
+            <span class="detail-value">{{ getTaskTypeLabel(currentTask.type) }}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">最后进度</span>
+            <span class="detail-value">{{ currentTask.progress }}%</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">创建时间</span>
+            <span class="detail-value">{{ formatTime(currentTask.createdAt) }}</span>
+          </div>
+          <div class="detail-item">
+            <span class="detail-label">取消时间</span>
+            <span class="detail-value">{{ formatTime(currentTask.lastUpdatedAt) }}</span>
+          </div>
+        </div>
+
+        <div class="action-buttons">
           <Button variant="secondary" @click="clearTask">
             清除任务
           </Button>
@@ -178,6 +226,27 @@
         </div>
       </div>
     </Card>
+
+    <!-- 终止任务确认对话框 -->
+    <div v-if="showStopConfirm" class="modal-overlay" @click="showStopConfirm = false">
+      <div class="modal-content" @click.stop>
+        <div class="modal-header">
+          <h3>确认终止任务</h3>
+        </div>
+        <div class="modal-body">
+          <p>确定要终止当前任务吗？</p>
+          <p class="modal-warning">任务终止后将无法恢复，已处理的数据可能会丢失。</p>
+        </div>
+        <div class="modal-footer">
+          <Button variant="secondary" @click="showStopConfirm = false">
+            取消
+          </Button>
+          <Button variant="danger" @click="stopTask">
+            确定终止
+          </Button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -203,6 +272,10 @@ let unsubscribe: (() => void) | null = null
 
 // 计时器ID
 let timerInterval: number | null = null
+
+// 终止任务相关状态
+const showStopConfirm = ref(false)
+const isStopping = ref(false)
 
 /**
  * 【第七步】任务进度展示页面的设计
@@ -349,6 +422,45 @@ const navigateToResult = () => {
 const clearTask = () => {
   taskManager.clearTask()
   currentTask.value = null
+}
+
+/**
+ * 停止任务
+ * 调用后端API终止正在运行的任务
+ */
+const stopTask = async () => {
+  if (!currentTask.value) return
+
+  // 关闭确认对话框
+  showStopConfirm.value = false
+
+  // 设置停止中状态
+  isStopping.value = true
+
+  try {
+    const response = await fetch(`/api/tasks/stop/${currentTask.value.id}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      throw new Error(error.detail || '停止任务失败')
+    }
+
+    const result = await response.json()
+    console.log('任务已终止:', result)
+
+    // 显示成功提示
+    alert('任务已成功终止')
+  } catch (error) {
+    console.error('停止任务失败:', error)
+    alert(`停止任务失败: ${error instanceof Error ? error.message : '未知错误'}`)
+  } finally {
+    isStopping.value = false
+  }
 }
 </script>
 
@@ -567,10 +679,11 @@ const clearTask = () => {
   stroke-width: 2;
 }
 
-/* ============ 完成/失败/中断状态 ============ */
+/* ============ 完成/失败/中断/取消状态 ============ */
 .task-completed,
 .task-failed,
-.task-interrupted {
+.task-interrupted,
+.task-cancelled {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -623,5 +736,64 @@ const clearTask = () => {
 
 .action-buttons button {
   min-width: 120px;
+}
+
+/* ============ 模态框 ============ */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background: white;
+  border-radius: 12px;
+  padding: 24px;
+  max-width: 400px;
+  width: 90%;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.modal-header h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #333;
+  margin: 0 0 16px 0;
+}
+
+.modal-body {
+  margin-bottom: 24px;
+}
+
+.modal-body p {
+  font-size: 14px;
+  color: #666;
+  margin: 0 0 8px 0;
+}
+
+.modal-warning {
+  font-size: 13px;
+  color: #ff9500;
+  background-color: #fffbf0;
+  padding: 8px 12px;
+  border-radius: 4px;
+  border-left: 3px solid #ff9500;
+}
+
+.modal-footer {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.modal-footer button {
+  min-width: 80px;
 }
 </style>

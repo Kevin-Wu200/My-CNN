@@ -399,7 +399,7 @@ class TaskManagerImpl {
     }
   }
   /**
-   * 启动无监督分类任务
+   * 启动非监督分类任务
    *
    * 【关键设计】
    * - 此方法在组件中被调用，但任务执行逻辑完全在 Worker 中执行
@@ -415,7 +415,7 @@ class TaskManagerImpl {
   ): Promise<string> {
     const taskId = this.generateTaskId()
 
-    console.log('[TaskManager] 启动无监督任务:', {
+    console.log('[TaskManager] 启动非监督任务:', {
       taskId,
       workerInstanceId: this.currentWorkerInstanceId,
       workerExists: !!this.worker,
@@ -562,7 +562,7 @@ class TaskManagerImpl {
 
       // 【第三步】向 Worker 发送任务（带有文件路径）
       if (this.worker) {
-        console.log('[TaskManager] 向 Worker 发送无监督任务:', {
+        console.log('[TaskManager] 向 Worker 发送非监督任务:', {
           taskId,
           workerInstanceId: this.currentWorkerInstanceId,
           filePath,
@@ -629,7 +629,7 @@ class TaskManagerImpl {
       return taskId
     } catch (error: any) {
       // 上传失败，标记任务为失败
-      console.error('[TaskManager] 无监督任务启动失败:', error)
+      console.error('[TaskManager] 非监督任务启动失败:', error)
 
       task.status = 'failed'
       task.error = error.message || '任务启动失败'
