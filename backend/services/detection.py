@@ -8,12 +8,10 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from pathlib import Path
 from typing import Tuple, Optional, List, Dict
 import logging
 
 from backend.utils.slic_processor import SLICProcessor
-from backend.services.image_processing import ImageProcessingService
 from backend.utils.tile_utils import TilingService, Tile, DEFAULT_TILE_SIZE
 from backend.services.parallel_processing import ParallelProcessingService
 

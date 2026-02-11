@@ -4,8 +4,7 @@
 """
 
 import numpy as np
-from pathlib import Path
-from typing import Tuple, List, Optional, Dict
+from typing import Tuple, List, Optional
 import logging
 
 from backend.utils.image_reader import ImageReader

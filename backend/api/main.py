@@ -6,9 +6,7 @@ FastAPI 主应用程序入口
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import logging
 import signal
-import sys
 import time
 import os
 import multiprocessing as mp

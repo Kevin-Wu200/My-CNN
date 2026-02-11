@@ -7,15 +7,12 @@
 """
 
 import numpy as np
-from pathlib import Path
 from typing import Tuple, Optional, Dict, List
 import logging
 from skimage.color import rgb2gray
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-from scipy.ndimage import label, center_of_mass
-from scipy import ndimage
-import cv2
+from scipy.ndimage import label
 
 from backend.utils.tile_utils import TilingService, Tile, DEFAULT_TILE_SIZE
 from backend.services.parallel_processing import ParallelProcessingService
