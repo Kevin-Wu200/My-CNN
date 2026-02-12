@@ -20,6 +20,7 @@ from backend.utils.resource_monitor import ResourceMonitor
 from backend.utils.file_path_manager import FilePathManager
 from backend.services.unsupervised_detection import UnsupervisedDiseaseDetectionService
 from backend.services.background_task_manager import get_task_manager
+from backend.services.task_file_cleanup import TaskFileCleanupService
 from backend.models.database import UploadSession, get_db_manager
 
 logger = logging.getLogger(__name__)
@@ -447,6 +448,13 @@ def _run_unsupervised_detection(
         if task_manager.is_stop_requested(task_id):
             logger.info(f"[{task_id}] 检测任务被停止（文件检查阶段）")
             task_manager.cancel_task(task_id, "用户停止")
+            # 取消的任务也需要清理文件
+            try:
+                result_data = {"image_path": image_path}
+                TaskFileCleanupService.schedule_cleanup(task_id, result_data, delay_seconds=120)
+                logger.info(f"[{task_id}] 取消任务的文件清理已调度")
+            except Exception as cleanup_error:
+                logger.error(f"[{task_id}] 调度文件清理失败: {str(cleanup_error)}")
             return
 
         task_manager.update_progress(task_id, 10, "读取影像中")
@@ -467,6 +475,13 @@ def _run_unsupervised_detection(
         if task_manager.is_stop_requested(task_id):
             logger.info(f"[{task_id}] 检测任务被停止（影像读取后）")
             task_manager.cancel_task(task_id, "用户停止")
+            # 取消的任务也需要清理文件
+            try:
+                result_data = {"image_path": image_path}
+                TaskFileCleanupService.schedule_cleanup(task_id, result_data, delay_seconds=120)
+                logger.info(f"[{task_id}] 取消任务的文件清理已调度")
+            except Exception as cleanup_error:
+                logger.error(f"[{task_id}] 调度文件清理失败: {str(cleanup_error)}")
             return
 
         task_manager.update_progress(task_id, 30, "执行检测中")
@@ -494,6 +509,13 @@ def _run_unsupervised_detection(
         if task_manager.is_stop_requested(task_id):
             logger.info(f"[{task_id}] 检测任务被停止（检测完成后）")
             task_manager.cancel_task(task_id, "用户停止")
+            # 取消的任务也需要清理文件
+            try:
+                result_data = {"image_path": image_path}
+                TaskFileCleanupService.schedule_cleanup(task_id, result_data, delay_seconds=120)
+                logger.info(f"[{task_id}] 取消任务的文件清理已调度")
+            except Exception as cleanup_error:
+                logger.error(f"[{task_id}] 调度文件清理失败: {str(cleanup_error)}")
             return
 
         task_manager.update_progress(task_id, 90, "处理结果中")
@@ -519,10 +541,23 @@ def _run_unsupervised_detection(
         logger.info(f"[{task_id}] 后台任务已完成")
         ResourceMonitor.log_resource_status(f"后台任务完成 [{task_id}]")
 
+        # 调度文件清理（延迟120秒执行）
+        TaskFileCleanupService.schedule_cleanup(task_id, result_data, delay_seconds=120)
+        logger.info(f"[{task_id}] 文件清理已调度，将在120秒后执行")
+
     except Exception as e:
         logger.error(f"[{task_id}] 检测任务执行失败: {str(e)}")
         ResourceMonitor.log_resource_status(f"后台任务异常 [{task_id}]")
         task_manager.fail_task(task_id, f"检测任务执行失败: {str(e)}")
+
+        # 失败任务也需要清理文件（延迟120秒执行）
+        # 构造最小的结果数据用于文件查找
+        try:
+            result_data = {"image_path": image_path}
+            TaskFileCleanupService.schedule_cleanup(task_id, result_data, delay_seconds=120)
+            logger.info(f"[{task_id}] 失败任务的文件清理已调度，将在120秒后执行")
+        except Exception as cleanup_error:
+            logger.error(f"[{task_id}] 调度文件清理失败: {str(cleanup_error)}")
 
 
 @router.get("/method-info")
