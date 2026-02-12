@@ -623,34 +623,9 @@ class BackgroundTaskManager:
             # 第8步：在日志中明确区分三种状态 - 合并完成且文件存在
             logger.info(f"[MERGE_STATUS_MERGE_COMPLETE_FILE_EXISTS] uploadId={uploadId}, filePath={output_path}, fileSize={actual_size}")
 
-            # 第7步：在上传完成后，将写入成功的 tif 文件，显式复制到 storage/detection_images
-            logger.info(f"[COPY_TO_DETECTION_START] uploadId={uploadId}, sourcePath={output_path}")
-
-            detection_images_dir = FilePathManager.get_detection_images_dir()
-            FilePathManager.ensure_directory_exists(detection_images_dir)
-
-            # 生成目标文件路径：使用原始文件名或uploadId
-            detection_file_name = Path(fileName).name if fileName else f"{uploadId}.tif"
-            detection_file_path = detection_images_dir / detection_file_name
-
-            # 复制文件到 detection_images
-            try:
-                shutil.copy2(output_path, detection_file_path)
-                logger.info(f"[FILE_COPIED_TO_DETECTION] uploadId={uploadId}, sourcePath={output_path}, destPath={detection_file_path}")
-
-                # 验证复制后的文件
-                if not detection_file_path.exists():
-                    raise FileNotFoundError(f"复制后的文件不存在: {detection_file_path}")
-
-                detection_file_size = detection_file_path.stat().st_size
-                if detection_file_size != actual_size:
-                    detection_file_path.unlink()
-                    raise ValueError(f"复制后文件大小不匹配: 期望 {actual_size}, 实际 {detection_file_size}")
-
-                logger.info(f"[DETECTION_FILE_VALIDATION_PASS] uploadId={uploadId}, filePath={detection_file_path}, fileSize={detection_file_size}")
-            except Exception as copy_error:
-                logger.error(f"[COPY_TO_DETECTION_FAILED] uploadId={uploadId}, error={str(copy_error)}")
-                raise IOError(f"复制文件到 detection_images 失败: {str(copy_error)}")
+            # 优化：直接使用 merged 文件作为唯一数据源，不再复制到 detection_images
+            # 这样可以避免重复存储，节省磁盘空间
+            logger.info(f"[SINGLE_STORAGE_OPTIMIZATION] uploadId={uploadId}, 使用merged文件作为唯一数据源: {output_path}")
 
             # 第5步：将合并后的完整tif文件路径保存到后端的任务状态或上传记录中
             db_manager = get_db_manager()
@@ -670,12 +645,13 @@ class BackgroundTaskManager:
                         f"[MERGE_COMPLETE_STATUS_SET] uploadId={uploadId}, "
                         f"filePath={output_path}"
                     )
+                    logger.info(f"[SINGLE_STORAGE_VERIFIED] uploadId={uploadId}, 文件仅存储在: {output_path}, 无重复副本")
 
                     # 更新为 completed
                     upload_session.status = "completed"
                     upload_session.updated_at = datetime.now()
                     db_session.commit()
-                    logger.info(f"[FILE_READY_STATUS_SET] uploadId={uploadId}")
+                    logger.info(f"[FILE_READY_STATUS_SET] uploadId={uploadId}, 数据库路径={output_path}")
                 else:
                     logger.warning(f"[SESSION_NOT_FOUND] uploadId={uploadId}")
 

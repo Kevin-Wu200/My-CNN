@@ -2,8 +2,11 @@
 任务文件清理服务
 
 在无监督检测任务完成后，自动清理与该任务相关的文件：
-- storage/merged/{uploadId}.tif (合并后的原始文件)
-- storage/detection_images/{fileName} (检测用的影像副本)
+- storage/merged/{uploadId}.tif (合并后的原始文件，唯一数据源)
+
+优化说明：
+- 移除了文件复制逻辑，使用 merged 文件作为唯一数据源
+- 避免重复存储，节省磁盘空间
 
 严格限制：
 1. 不影响现有上传、检测和任务查询逻辑
@@ -138,6 +141,8 @@ class TaskFileCleanupService:
         """
         根据任务结果查找相关文件
 
+        优化后的逻辑：由于移除了文件复制，image_path 直接指向 merged 文件（唯一数据源）
+
         Args:
             task_result: 任务结果数据
 
@@ -153,38 +158,14 @@ class TaskFileCleanupService:
                 logger.warning("[CLEANUP_SKIP] 任务结果中没有 image_path")
                 return related_files
 
-            # 添加 detection_images 中的文件
-            detection_file = Path(image_path)
-            if detection_file.exists():
-                related_files.append(detection_file)
-                logger.info(f"[CLEANUP_FILE_FOUND] 检测影像文件: {detection_file}")
-
-            # 查找对应的 merged 文件
-            # 通过数据库查询 UploadSession，匹配 file_path
-            db_manager = get_db_manager()
-            db_session = db_manager.get_session()
-            try:
-                # 查询所有 completed 状态的上传会话
-                upload_sessions = db_session.query(UploadSession).filter(
-                    UploadSession.status == "completed"
-                ).all()
-
-                # 匹配 detection_images 中的文件名
-                detection_file_name = detection_file.name
-                for session in upload_sessions:
-                    if session.file_path:
-                        merged_file = Path(session.file_path)
-                        # 检查是否匹配（通过文件名或 uploadId）
-                        if merged_file.exists():
-                            # 检查对应的 detection_images 文件是否匹配
-                            session_detection_file = FilePathManager.get_detection_images_dir() / session.file_name
-                            if session_detection_file == detection_file:
-                                related_files.append(merged_file)
-                                logger.info(f"[CLEANUP_FILE_FOUND] 合并文件: {merged_file}, uploadId={session.upload_id}")
-                                break
-
-            finally:
-                db_session.close()
+            # 优化：image_path 现在直接指向 merged 文件（唯一数据源）
+            # 不再需要查询数据库或查找其他文件
+            merged_file = Path(image_path)
+            if merged_file.exists():
+                related_files.append(merged_file)
+                logger.info(f"[CLEANUP_FILE_FOUND] 合并文件（唯一数据源）: {merged_file}")
+            else:
+                logger.warning(f"[CLEANUP_SKIP] 文件不存在: {merged_file}")
 
         except Exception as e:
             logger.error(f"[CLEANUP_ERROR] 查找相关文件时发生错误: {str(e)}")
@@ -210,13 +191,7 @@ class TaskFileCleanupService:
                 logger.info(f"[CLEANUP_SKIP] 没有找到需要清理的文件: task_id={task_id}")
                 return
 
-            # 清理顺序：先删除 detection_images，再删除 merged
-            # 按照路径排序，确保 detection_images 在前
-            related_files.sort(key=lambda p: (
-                0 if "detection_images" in str(p) else 1,
-                str(p)
-            ))
-
+            # 优化：现在只有 merged 文件（唯一数据源），无需排序
             deleted_count = 0
             failed_count = 0
 
