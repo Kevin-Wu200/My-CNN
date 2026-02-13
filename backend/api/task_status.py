@@ -93,9 +93,25 @@ async def stop_task(task_id: str) -> Dict[str, Any]:
     Returns:
         停止结果
     """
-    # 检查任务是否存在
+    # 检查任务是否存在于内存中
     task = task_manager.get_task_status(task_id)
+
+    # 如果任务不在内存中，检查数据库
     if not task:
+        db_task = task_manager.storage.load_task(task_id)
+        if db_task:
+            # 任务存在于数据库中，检查状态
+            task_status = db_task["status"]
+            if task_status in ["completed", "failed", "cancelled"]:
+                logger.info(f"任务已处于终止状态: {task_id}, 状态: {task_status}")
+                return {
+                    "status": "already_stopped",
+                    "task_id": task_id,
+                    "current_status": task_status,
+                    "message": f"任务已处于终止状态: {task_status}",
+                }
+
+        # 任务既不在内存也不在数据库中
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"任务不存在: {task_id}",
@@ -103,10 +119,13 @@ async def stop_task(task_id: str) -> Dict[str, Any]:
 
     # 检查任务状态
     if task["status"] != "running":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"任务未在运行中，当前状态: {task['status']}",
-        )
+        logger.info(f"任务未在运行中: {task_id}, 当前状态: {task['status']}")
+        return {
+            "status": "already_stopped",
+            "task_id": task_id,
+            "current_status": task["status"],
+            "message": f"任务未在运行中，当前状态: {task['status']}",
+        }
 
     try:
         # 设置停止标志

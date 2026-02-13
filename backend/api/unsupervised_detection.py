@@ -285,9 +285,25 @@ async def stop_detection_task(task_id: str) -> Dict[str, Any]:
     try:
         logger.info(f"[API] 收到停止检测请求: task_id={task_id}")
 
-        # 检查任务是否存在
+        # 检查任务是否存在于内存中
         task = task_manager.get_task_status(task_id)
+
+        # 如果任务不在内存中，检查数据库
         if not task:
+            db_task = task_manager.storage.load_task(task_id)
+            if db_task:
+                # 任务存在于数据库中，检查状态
+                task_status_value = db_task["status"]
+                if task_status_value in ["completed", "failed", "cancelled"]:
+                    logger.info(f"[API] 任务已处于终止状态: {task_id}, 状态: {task_status_value}")
+                    return {
+                        "status": "already_stopped",
+                        "task_id": task_id,
+                        "current_status": task_status_value,
+                        "message": f"任务已处于终止状态: {task_status_value}",
+                    }
+
+            # 任务既不在内存也不在数据库中
             logger.warning(f"[API] 任务不存在: {task_id}")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -298,8 +314,9 @@ async def stop_detection_task(task_id: str) -> Dict[str, Any]:
         if task["status"] != "running":
             logger.warning(f"[API] 任务不在运行中: {task_id}, 当前状态: {task['status']}")
             return {
-                "status": "skipped",
+                "status": "already_stopped",
                 "task_id": task_id,
+                "current_status": task["status"],
                 "message": f"任务不在运行中，当前状态: {task['status']}",
             }
 
