@@ -94,7 +94,13 @@ interface WorkerErrorMessage {
   timestamp: number
 }
 
-type WorkerMessage = WorkerProgressMessage | WorkerSuccessMessage | WorkerErrorMessage
+interface WorkerTaskIdUpdateMessage {
+  type: 'task_id_update'
+  frontendTaskId: string
+  backendTaskId: string
+}
+
+type WorkerMessage = WorkerProgressMessage | WorkerSuccessMessage | WorkerErrorMessage | WorkerTaskIdUpdateMessage
 
 // ============ TaskManager 实现类 ============
 /**
@@ -501,7 +507,74 @@ class TaskManagerImpl {
           stage: (message as any).stage,
         })
 
-        if (message.type === 'progress') {
+        if (message.type === 'task_id_update') {
+          // 【关键修复】更新任务ID为后端生成的ID
+          const oldTaskId = message.frontendTaskId
+          const newTaskId = message.backendTaskId
+
+          console.log('[TaskManager] 更新任务ID:', {
+            oldTaskId,
+            newTaskId,
+          })
+
+          // 更新任务ID
+          task.id = newTaskId
+          this.updateTaskState(task)
+
+          // 更新消息处理器映射
+          this.messageHandlers.delete(oldTaskId)
+          this.messageHandlers.set(newTaskId, messageHandler)
+
+          // 更新活跃任务ID集合
+          this.activeTaskIds.delete(oldTaskId)
+          this.activeTaskIds.add(newTaskId)
+
+          // 【关键修复】现在启动后端进度轮询，使用正确的后端任务ID
+          console.log('[TaskManager] 启动后端进度轮询:', newTaskId)
+          progressPoller.startPolling({
+            taskId: newTaskId,
+            onProgress: (progress, stage) => {
+              // 后端进度更新
+              if (task.progress < progress) {
+                task.progress = progress
+                task.currentStage = stage
+                task.lastUpdatedAt = Date.now()
+                this.updateTaskState(task)
+              }
+            },
+            onComplete: (result) => {
+              // 后端任务完成
+              if (task.status !== 'completed') {
+                task.result = result
+                task.progress = 100
+                task.currentStage = '处理完成'
+                task.status = 'completed'
+                task.lastUpdatedAt = Date.now()
+                this.updateTaskState(task)
+                sessionStorage.setItem('detectionResult', JSON.stringify(result))
+                setTimeout(() => {
+                  this.clearPersistedTaskState()
+                }, 1500)
+              }
+            },
+            onError: (error) => {
+              // 后端任务失败
+              if (task.status !== 'failed') {
+                task.status = 'failed'
+                task.error = error
+                task.interruptType = INTERRUPT_TYPES.BACKEND_INFERENCE_FAILED
+                task.interruptedAt = Date.now()
+                task.lastUpdatedAt = Date.now()
+                this.updateTaskState(task)
+              }
+            },
+            onStop: () => {
+              console.log('[TaskManager] 后端进度轮询已停止:', newTaskId)
+            },
+          })
+
+          console.log('[TaskManager] 任务ID更新完成')
+        } else if (message.type === 'progress') {
           task.progress = message.progress
           task.currentStage = message.stage
           task.lastUpdatedAt = Date.now()
@@ -580,51 +653,6 @@ class TaskManagerImpl {
       } else {
         throw new Error('Worker 未初始化')
       }
-
-      // 【第四步】启动后端进度轮询（每10秒查询一次）
-      // 这是一个备用机制，用于在 Worker 通信失败时从后端获取进度
-      console.log('[TaskManager] 启动后端进度轮询:', taskId)
-      progressPoller.startPolling({
-        taskId,
-        onProgress: (progress, stage) => {
-          // 后端进度更新
-          if (task.progress < progress) {
-            task.progress = progress
-            task.currentStage = stage
-            task.lastUpdatedAt = Date.now()
-            this.updateTaskState(task)
-          }
-        },
-        onComplete: (result) => {
-          // 后端任务完成
-          if (task.status !== 'completed') {
-            task.result = result
-            task.progress = 100
-            task.currentStage = '处理完成'
-            task.status = 'completed'
-            task.lastUpdatedAt = Date.now()
-            this.updateTaskState(task)
-            sessionStorage.setItem('detectionResult', JSON.stringify(result))
-            setTimeout(() => {
-              this.clearPersistedTaskState()
-            }, 1500)
-          }
-        },
-        onError: (error) => {
-          // 后端任务失败
-          if (task.status !== 'failed') {
-            task.status = 'failed'
-            task.error = error
-            task.interruptType = INTERRUPT_TYPES.BACKEND_INFERENCE_FAILED
-            task.interruptedAt = Date.now()
-            task.lastUpdatedAt = Date.now()
-            this.updateTaskState(task)
-          }
-        },
-        onStop: () => {
-          console.log('[TaskManager] 后端进度轮询已停止:', taskId)
-        },
-      })
 
       return taskId
     } catch (error: any) {

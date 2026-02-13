@@ -35,7 +35,17 @@ interface WorkerErrorMessage {
   timestamp: number
 }
 
-type WorkerMessage = WorkerProgressMessage | WorkerSuccessMessage | WorkerErrorMessage
+/**
+ * Worker任务ID更新消息
+ * 用于将后端生成的任务ID传回主线程
+ */
+interface WorkerTaskIdUpdateMessage {
+  type: 'task_id_update'
+  frontendTaskId: string
+  backendTaskId: string
+}
+
+type WorkerMessage = WorkerProgressMessage | WorkerSuccessMessage | WorkerErrorMessage | WorkerTaskIdUpdateMessage
 
 // ============ Worker错误代码定义 ============
 const ERROR_CODES = {
@@ -261,6 +271,7 @@ async function detectUnsupervisedDisease(
  * - 文件上传已在主线程完成，Worker 接收文件路径
  * - Worker 启动后台检测任务并轮询状态
  * - 真正执行非监督检测算法，而不是模拟逻辑
+ * - 将后端生成的任务ID传回主线程，以便主线程可以停止任务
  */
 async function handleUnsupervisedTask(taskId: string, data: any): Promise<void> {
   try {
@@ -276,6 +287,10 @@ async function handleUnsupervisedTask(taskId: string, data: any): Promise<void> 
       params.nClusters,
       params.minArea
     )
+
+    // 【关键修复】将后端任务ID传回主线程
+    sendTaskIdUpdate(taskId, backendTaskId)
+
     sendProgress(taskId, 20, `检测任务已启动 (ID: ${backendTaskId})`)
 
     // 步骤 2: 轮询任务状态
@@ -454,6 +469,19 @@ function sendError(
   self.postMessage(message)
 }
 
+/**
+ * 发送任务ID更新消息
+ * 将后端生成的任务ID传回主线程，以便主线程可以使用正确的ID停止任务
+ */
+function sendTaskIdUpdate(frontendTaskId: string, backendTaskId: string): void {
+  const message: WorkerTaskIdUpdateMessage = {
+    type: 'task_id_update',
+    frontendTaskId,
+    backendTaskId,
+  }
+  self.postMessage(message)
+}
+
 // ============ 工具函数 ============
 
 /**
@@ -464,4 +492,4 @@ function delay(ms: number): Promise<void> {
 }
 
 // 导出类型供主线程使用
-export type { WorkerMessage, WorkerProgressMessage, WorkerSuccessMessage, WorkerErrorMessage }
+export type { WorkerMessage, WorkerProgressMessage, WorkerSuccessMessage, WorkerErrorMessage, WorkerTaskIdUpdateMessage }
