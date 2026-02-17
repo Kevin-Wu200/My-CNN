@@ -24,3 +24,6 @@ node_modules/
 # Test reports
 test_reports/
 backups/
+
+# Logo
+frontend/src/assets/logo/logo.png
