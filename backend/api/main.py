@@ -408,5 +408,6 @@ if __name__ == "__main__":
         logger.info("捕获到 KeyboardInterrupt，服务正在关闭...")
     except Exception as e:
         logger.error(f"服务启动失败: {str(e)}", exc_info=True)
-        # 关键：不调用 sys.exit(1)，让进程自然退出
-        # 这样可以确保任何清理代码都有机会执行
+        # 修复：启动失败时必须退出，避免产生僵尸进程
+        import sys
+        sys.exit(1)

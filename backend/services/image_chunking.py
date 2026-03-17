@@ -9,6 +9,7 @@ from typing import Tuple, Optional, List, Dict, NamedTuple
 import logging
 
 from backend.utils.image_reader import ImageReader
+from backend.utils.resource_monitor import ResourceMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -180,21 +181,69 @@ class ImageChunkingService:
         Returns:
             (合并是否成功, 合并后的影像, 错误信息或成功消息)
         """
+        import sys
+        import time as _time
+
         try:
+            logger.info("开始执行图像合并 (merge_chunks)")
+            merge_start = _time.time()
+
             if not chunks or len(chunks) == 0:
                 return False, None, "影像块列表为空"
+
+            logger.info(f"chunk count: {len(chunks)}")
+            logger.info(f"output size: {image_width}x{image_height}, chunk_size={chunk_width}x{chunk_height}")
+
+            logger.info(f"检查 chunks 内容: {len(chunks)} 个")
+            invalid_chunks = [i for i, c in enumerate(chunks) if c is None or c.size == 0]
+            if invalid_chunks:
+                logger.error(f"chunks contains invalid entries at indices: {invalid_chunks}")
+
+            chunk_dtypes = set()
+            chunk_bands = set()
+            for i, chunk in enumerate(chunks):
+                chunk_dtypes.add(str(chunk.dtype))
+                chunk_bands.add(chunk.shape[2] if len(chunk.shape) == 3 else 1)
+            if len(chunk_dtypes) > 1:
+                logger.warning(f"chunk dtype 不一致: {chunk_dtypes}")
+            if len(chunk_bands) > 1:
+                logger.warning(f"chunk 波段数不一致: {chunk_bands}")
 
             # 获取通道数
             num_channels = chunks[0].shape[2]
 
+            logger.info(f"output_width={image_width}, output_height={image_height}, num_channels={num_channels}")
+
             # 初始化合并后的影像
+            dtype = chunks[0].dtype
+            estimated_size = image_height * image_width * num_channels * np.dtype(dtype).itemsize
+            memory_info = ResourceMonitor.get_memory_usage()
+            available_memory = memory_info['available'] * 1024 * 1024  # MB -> bytes
+            logger.info(
+                f"内存检查: 可用={available_memory/1024/1024:.1f}MB, "
+                f"需要={estimated_size/1024/1024:.1f}MB"
+            )
+            if estimated_size > available_memory * 0.8:
+                error_msg = (
+                    f"内存不足: 需要 {estimated_size/1024/1024:.1f}MB, "
+                    f"可用 {available_memory/1024/1024:.1f}MB (使用率超过80%)"
+                )
+                logger.error(error_msg)
+                return False, None, error_msg
+
             merged_image = np.zeros(
                 (image_height, image_width, num_channels),
                 dtype=chunks[0].dtype,
             )
 
+            logger.info(f"merged_image.nbytes={merged_image.nbytes} ({merged_image.nbytes / 1024 / 1024:.1f} MB)")
+            if merged_image.nbytes > 2 * 1024 * 1024 * 1024:
+                logger.warning("merged_image 超过 2GB，可能导致内存问题")
+
             # 合并块
             chunk_idx = 0
+            total_chunks = len(chunks)
+            log_interval = max(1, total_chunks // 20)  # 最多输出20次进度日志
             for y in range(0, image_height, chunk_height):
                 for x in range(0, image_width, chunk_width):
                     if chunk_idx >= len(chunks):
@@ -202,9 +251,22 @@ class ImageChunkingService:
 
                     chunk = chunks[chunk_idx]
 
+                    # 只在关键节点输出日志
+                    if chunk_idx % log_interval == 0 or chunk_idx == total_chunks - 1:
+                        progress = int((chunk_idx + 1) / total_chunks * 100)
+                        logger.info(f"合并进度: {chunk_idx+1}/{total_chunks} ({progress}%)")
+
                     # 计算实际的块大小（边界处可能更小）
                     actual_height = min(chunk_height, image_height - y)
                     actual_width = min(chunk_width, image_width - x)
+
+                    # 确保 chunk 不超出目标图边界
+                    if y + actual_height > image_height or x + actual_width > image_width:
+                        logger.error(
+                            f"chunk {chunk_idx} 超出目标图边界: "
+                            f"region=({y},{y+actual_height},{x},{x+actual_width}), "
+                            f"target=({image_height},{image_width})"
+                        )
 
                     # 将块放入合并后的影像
                     merged_image[y : y + actual_height, x : x + actual_width, :] = chunk[
@@ -213,12 +275,22 @@ class ImageChunkingService:
 
                     chunk_idx += 1
 
+            logger.info(f"chunks 总大小: {sys.getsizeof(chunks)} bytes")
+
+            merge_elapsed = _time.time() - merge_start
+            logger.info(f"merge time: {merge_elapsed:.2f}s")
+
+            if merge_elapsed > 300:
+                logger.warning(f"merge taking too long: {merge_elapsed:.2f}s > 300s")
+
             logger.info(f"影像块合并完成: {len(chunks)} 个块")
+
+            logger.info("图像合并完成")
 
             return True, merged_image, "块合并成功"
 
         except Exception as e:
-            logger.error(f"块合并失败: {str(e)}")
+            logger.exception(f"块合并失败: {e}")
             return False, None, f"块合并失败: {str(e)}"
 
     @staticmethod

@@ -66,6 +66,18 @@ DETECTION_CONFIG = {
     "nms_threshold": 0.3,
 }
 
+# 3D-2D-1D 多维降维配置
+MULTIDIM_REDUCTION_CONFIG = {
+    "enabled": True,
+    "reduction_factor": 4,
+    "final_channels": 128,
+    "use_attention": True,
+    "attention_type": "se",  # "se" 或 "cbam"
+    "adaptive_strategy": True,
+    "use_depthwise_separable": False,
+    "groups": 1,
+}
+
 # 数值库线程限制配置
 # 每个 worker 进程使用的线程数
 # 建议值：2-4

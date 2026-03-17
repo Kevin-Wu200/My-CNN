@@ -6,7 +6,7 @@
 import psutil
 import os
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -146,3 +146,46 @@ class ResourceMonitor:
         except Exception as e:
             logger.error(f"获取资源快照失败: {str(e)}")
             return {}
+
+    @staticmethod
+    def check_resource_limits(
+        cpu_threshold: float = 90.0,
+        memory_threshold: float = 90.0,
+        process_threshold: int = 1000,
+    ) -> Tuple[bool, List[str]]:
+        """
+        检查资源是否超过阈值
+
+        Args:
+            cpu_threshold: CPU使用率阈值（%）
+            memory_threshold: 内存使用率阈值（%）
+            process_threshold: 进程数阈值
+
+        Returns:
+            (是否超过阈值, 超限的资源列表)
+        """
+        warnings = []
+
+        # 检查CPU使用率
+        cpu_usage = ResourceMonitor.get_cpu_usage()
+        if cpu_usage > cpu_threshold:
+            warnings.append(f"CPU使用率过高: {cpu_usage:.1f}%")
+
+        # 检查内存使用率
+        memory_info = ResourceMonitor.get_memory_usage()
+        if memory_info['percent'] > memory_threshold:
+            warnings.append(
+                f"内存使用率过高: {memory_info['percent']:.1f}% "
+                f"({memory_info['used']:.1f}MB/{memory_info['total']:.1f}MB)"
+            )
+
+        # 检查进程数
+        process_count = ResourceMonitor.get_process_count()
+        if process_count > process_threshold:
+            warnings.append(f"进程数过多: {process_count}")
+
+        if warnings:
+            for w in warnings:
+                logger.warning(f"[资源预警] {w}")
+
+        return len(warnings) > 0, warnings

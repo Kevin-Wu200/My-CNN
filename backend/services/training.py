@@ -13,6 +13,7 @@ from typing import Dict, List, Tuple, Optional
 import logging
 import json
 import os
+import time
 
 from backend.utils.evaluation_metrics import EvaluationMetrics
 
@@ -30,6 +31,7 @@ class TrainingService:
         model: nn.Module,
         device: str = "cpu",
         model_save_dir: Optional[Path] = None,
+        model_config: Optional[Dict] = None,
     ):
         """
         初始化训练服务
@@ -38,11 +40,22 @@ class TrainingService:
             model: 要训练的模型
             device: 计算设备（cpu 或 cuda）
             model_save_dir: 模型保存目录
+            model_config: 模型配置字典（用于记录降维等配置信息）
         """
         self.model = model.to(device)
         self.device = device
         self.model_save_dir = model_save_dir or Path("./models")
         self.model_save_dir.mkdir(parents=True, exist_ok=True)
+        self.model_config = model_config or {}
+
+        # 记录降维配置
+        if self.model_config.get("use_multidim_reduction"):
+            logger.info(
+                f"[MULTIDIM_REDUCTION] enabled=True, "
+                f"reduction_factor={self.model_config.get('reduction_factor', 4)}, "
+                f"final_channels={self.model_config.get('final_channels', 128)}, "
+                f"attention={self.model_config.get('attention_type', 'se')}"
+            )
 
         # 验证保存目录的写权限
         if not os.access(str(self.model_save_dir), os.W_OK):
@@ -254,6 +267,7 @@ class TrainingService:
 
         best_val_loss = float("inf")
         best_model_path = None
+        train_start_time = time.time()
 
         logger.info(f"开始训练: {num_epochs} 个 epoch")
 
@@ -300,7 +314,8 @@ class TrainingService:
                 )
                 logger.info(f"保存最佳模型: {best_model_path}")
 
-        logger.info("训练完成")
+        total_train_time = time.time() - train_start_time
+        logger.info(f"训练完成, 总耗时: {total_train_time:.1f}s")
 
         return self.training_history
 

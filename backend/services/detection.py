@@ -8,6 +8,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import time
 from typing import Tuple, Optional, List, Dict
 import logging
 
@@ -96,6 +97,7 @@ class DiseaseTreeDetectionService:
             # 对每个 Patch 进行检测
             detections = []
             confidences = []
+            inference_start = time.time()
 
             with torch.no_grad():
                 for patch in patches:
@@ -114,6 +116,8 @@ class DiseaseTreeDetectionService:
                     detections.append(predicted_class.item())
                     confidences.append(confidence.item())
 
+            inference_time = time.time() - inference_start
+
             # 构建检测结果
             result = {
                 "labels": labels,
@@ -121,11 +125,13 @@ class DiseaseTreeDetectionService:
                 "confidences": np.array(confidences),
                 "num_superpixels": len(patches),
                 "num_positive": np.sum(np.array(detections) == 1),
+                "inference_time": inference_time,
             }
 
             logger.info(
                 f"检测完成: 总超像素数={result['num_superpixels']}, "
-                f"病害木超像素数={result['num_positive']}"
+                f"病害木超像素数={result['num_positive']}, "
+                f"推理时间={inference_time:.3f}s"
             )
 
             return True, result, "检测成功"

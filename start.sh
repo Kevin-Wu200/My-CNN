@@ -189,7 +189,15 @@ if ! kill -0 $BACKEND_PID 2>/dev/null; then
     exit 1
 fi
 
-log_success "后端服务健康检查通过"
+# 检查端口是否实际被绑定
+if ! lsof -i :8000 -t 2>/dev/null | grep -q "$BACKEND_PID"; then
+    log_error "后端启动失败：未能绑定端口 8000"
+    kill $BACKEND_PID 2>/dev/null
+    log_error "进程已终止，请检查日志了解失败原因"
+    exit 1
+fi
+
+log_success "后端服务健康检查通过（端口绑定成功）"
 
 # 关闭 set -e，防止后续命令失败导致脚本退出
 # 这确保了即使前端启动失败，后端服务也会继续运行

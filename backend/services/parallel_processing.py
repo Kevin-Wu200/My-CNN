@@ -34,6 +34,7 @@ class ParallelProcessingService:
         如果 CPU 核心数不足，则根据以下规则调整：
         - 使用 CPU 核心数的 1/2（向下取整）
         - 不超过 max_limit 上限
+        - 根据可用内存动态调整
 
         Args:
             max_limit: 最大工作进程数上限（默认 16）
@@ -44,12 +45,31 @@ class ParallelProcessingService:
         cpu_count = mp.cpu_count()
         # 优先使用默认的 8 个工作进程
         num_workers = min(DEFAULT_PARALLEL_WORKERS, cpu_count, max_limit)
+
+        # 根据可用内存动态调整
+        memory_info = ResourceMonitor.get_memory_usage()
+        available_memory_gb = memory_info['available'] / 1024  # MB -> GB
+
+        if available_memory_gb < 1:
+            num_workers = 1
+            logger.warning(
+                f"可用内存严重不足（{available_memory_gb:.1f}GB），"
+                f"使用单进程模式"
+            )
+        elif available_memory_gb < 2:
+            num_workers = max(1, num_workers // 2)
+            logger.info(
+                f"可用内存不足（{available_memory_gb:.1f}GB），"
+                f"减少工作进程数至 {num_workers}"
+            )
+
         # 确保至少有 1 个工作进程
         num_workers = max(num_workers, MIN_WORKERS)
 
         logger.info(
-            f"自动检测工作进程数: CPU 核心数={cpu_count}, "
-            f"使用工作进程数={num_workers}（默认并行处理数={DEFAULT_PARALLEL_WORKERS}）"
+            f"自动检测工作进程数: CPU核心数={cpu_count}, "
+            f"可用内存={available_memory_gb:.1f}GB, "
+            f"使用工作进程数={num_workers}"
         )
 
         return num_workers
@@ -72,10 +92,28 @@ class ParallelProcessingService:
                 logger.debug("正常关闭进程池，等待所有工作进程完成...")
                 pool.close()
 
-            # 显式等待所有进程完全退出
-            logger.debug("等待所有工作进程完全退出...")
-            pool.join()
-            logger.info("所有工作进程已完全退出")
+            # 使用轮询方式实现超时等待（Pool.join() 不支持 timeout 参数）
+            logger.debug("等待所有工作进程完全退出（超时30秒）...")
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                if not any(p.is_alive() for p in pool._pool):
+                    logger.info("所有工作进程已完全退出")
+                    return
+                time.sleep(0.5)
+
+            # 超时后强制终止
+            logger.warning("进程池未在超时时间内完全退出，强制终止")
+            pool.terminate()
+
+            # 再等待10秒
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                if not any(p.is_alive() for p in pool._pool):
+                    logger.info("所有工作进程已强制退出")
+                    return
+                time.sleep(0.5)
+
+            logger.error("进程池强制终止失败，仍有进程存活")
 
         except Exception as e:
             logger.error(f"进程池清理过程中出错: {str(e)}")
@@ -159,7 +197,7 @@ class ParallelProcessingService:
 
             results = []
             errors = []
-            RESULT_TIMEOUT = 300  # 5分钟超时
+            RESULT_TIMEOUT = 600  # 10分钟超时
 
             # 创建进程池并记录生命周期
             pool = Pool(processes=num_workers)
@@ -264,18 +302,19 @@ class ParallelProcessingService:
                             f"可能是工作进程崩溃或卡死"
                         )
 
-                        # 超时时强制终止工作进程
+                        # 标记该瓦片为失败，但继续收集其他结果
+                        processed_results.append(None)
                         logger.warning(
-                            f"分块 {tile_idx} 超时，尝试强制终止工作进程..."
+                            f"分块 {tile_idx} 超时，标记为失败，继续收集其他结果..."
                         )
-                        ParallelProcessingService._force_terminate_workers(pool, timeout=5)
 
                         if error_handling == "stop":
                             logger.warning("错误处理模式为 'stop'，中断处理")
                             ParallelProcessingService._cleanup_pool(pool, force=True)
                             return False, None, errors, f"分块处理中断: 超时"
 
-                        processed_results.append(None)
+                        # log模式下继续循环，跳过超时的瓦片
+                        # 不break，继续收集其他结果
 
                     except Exception as e:
                         error_info = {
@@ -296,6 +335,7 @@ class ParallelProcessingService:
 
                         processed_results.append(None)
 
+                logger.info("parallel processing finished")
                 logger.info(
                     f"所有分块处理结果已收集: {len(processed_results)} 个结果, "
                     f"{len(errors)} 个错误"

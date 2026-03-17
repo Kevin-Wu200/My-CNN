@@ -438,6 +438,76 @@ class BackgroundTaskManager:
 
         return removed_count
 
+    def check_and_recover_stuck_tasks(self, stuck_threshold: int = 300) -> int:
+        """
+        检查并恢复卡死的任务
+
+        Args:
+            stuck_threshold: 卡死阈值（秒），默认300秒（5分钟）
+
+        Returns:
+            恢复的任务数量
+        """
+        recovered_count = 0
+        stuck_tasks = []
+
+        for task_id, task in self.tasks.items():
+            if task["status"] == TaskStatus.RUNNING:
+                last_update = self.progress_timestamps.get(task_id)
+                if last_update:
+                    time_since_update = datetime.now().timestamp() - last_update
+                    if time_since_update > stuck_threshold:
+                        stuck_tasks.append(task_id)
+
+        if stuck_tasks:
+            logger.warning(
+                f"发现 {len(stuck_tasks)} 个卡死任务: {stuck_tasks}, "
+                f"卡死阈值={stuck_threshold}秒"
+            )
+
+        for task_id in stuck_tasks:
+            task = self.tasks.get(task_id)
+            if task:
+                try:
+                    logger.info(f"开始恢复卡死任务: {task_id}")
+                    self.force_terminate_task(task_id)
+                    self.fail_task(
+                        task_id,
+                        f"任务卡死超过{stuck_threshold}秒，已被自动终止"
+                    )
+                    recovered_count += 1
+                    logger.info(f"任务 {task_id} 已成功恢复")
+                except Exception as e:
+                    logger.error(f"恢复任务 {task_id} 失败: {str(e)}")
+
+        if recovered_count > 0:
+            logger.info(f"成功恢复 {recovered_count} 个卡死任务")
+
+        return recovered_count
+
+    def start_stuck_task_monitor(self, check_interval: int = 60) -> None:
+        """
+        启动卡死任务监控线程
+
+        Args:
+            check_interval: 检查间隔（秒），默认60秒
+        """
+        def monitor_loop():
+            while not self._shutdown_flag.is_set():
+                try:
+                    self.check_and_recover_stuck_tasks()
+                except Exception as e:
+                    logger.error(f"卡死任务监控出错: {str(e)}")
+                self._shutdown_flag.wait(check_interval)
+
+        monitor_thread = threading.Thread(
+            target=monitor_loop,
+            daemon=True,
+            name="StuckTaskMonitor"
+        )
+        monitor_thread.start()
+        logger.info(f"卡死任务监控已启动，检查间隔={check_interval}秒")
+
     def submit_merge_task(
         self,
         uploadId: str,
@@ -533,7 +603,6 @@ class BackgroundTaskManager:
             from backend.models.database import UploadSession, get_db_manager
             from backend.utils.file_path_manager import FilePathManager
 
-            # 第1步：定位并检查分片合并函数是否真的被调用，在合并函数入口强制打印日志
             logger.info(f"[MERGE_EXECUTING_START] taskId={task_id}, uploadId={uploadId}, fileName={fileName}, totalChunks={totalChunks}")
 
             # 更新任务进度
@@ -542,15 +611,12 @@ class BackgroundTaskManager:
             # 获取分片目录
             session_dir = FilePathManager.get_chunk_dir(uploadId)
 
-            # 第8步：在日志中明确区分三种状态 - 仅分片存在
             logger.info(f"[CHUNK_STATUS_ONLY_CHUNKS_EXIST] uploadId={uploadId}, chunkDir={session_dir}, totalChunks={totalChunks}")
 
-            # 第3步：在合并前增加严格校验 - 校验分片数量是否大于1
             if totalChunks <= 1:
                 raise ValueError(f"分片数量无效: {totalChunks}，必须大于1")
             logger.info(f"[CHUNK_COUNT_VALIDATION_PASS] uploadId={uploadId}, totalChunks={totalChunks}")
 
-            # 第3步：在合并前增加严格校验 - 校验每一个分片文件真实存在
             logger.info(f"[CHUNK_FILES_VALIDATION_START] uploadId={uploadId}")
             for i in range(totalChunks):
                 chunk_path = FilePathManager.get_chunk_path(uploadId, i)
@@ -559,14 +625,11 @@ class BackgroundTaskManager:
                 logger.debug(f"[CHUNK_FILE_EXISTS] uploadId={uploadId}, chunkIndex={i}, chunkPath={chunk_path}")
             logger.info(f"[CHUNK_FILES_VALIDATION_PASS] uploadId={uploadId}, allChunksExist=True")
 
-            # 第4步：合并成功后，明确生成一个唯一的完整tif文件路径
             output_path = FilePathManager.get_merged_file_path(fileName, uploadId)
             logger.info(f"[MERGED_FILE_PATH_GENERATED] uploadId={uploadId}, outputPath={output_path}")
 
-            # 第8步：在日志中明确区分三种状态 - 合并进行中
             logger.info(f"[MERGE_STATUS_MERGING_IN_PROGRESS] uploadId={uploadId}, outputPath={output_path}, totalChunks={totalChunks}")
 
-            # 第2步：确保合并逻辑只做一件事 - 按chunkIndex顺序读取所有分片文件，按二进制顺序写入一个新的完整tif文件
             logger.info(f"[MERGE_COMBINING_START] uploadId={uploadId}, outputPath={output_path}, totalChunks={totalChunks}")
 
             with open(output_path, "wb") as output_file:
@@ -592,7 +655,6 @@ class BackgroundTaskManager:
 
             logger.info(f"[MERGE_COMBINING_COMPLETE] uploadId={uploadId}, finalFilePath={output_path}, finalFileSize={actual_size}")
 
-            # 第4步：合并成功后，立即校验该文件在磁盘上真实存在
             logger.info(f"[FILE_VALIDATION_START] uploadId={uploadId}, filePath={output_path}")
 
             # 检查文件是否存在
@@ -620,14 +682,11 @@ class BackgroundTaskManager:
                 f"fileSize={actual_size}"
             )
 
-            # 第8步：在日志中明确区分三种状态 - 合并完成且文件存在
             logger.info(f"[MERGE_STATUS_MERGE_COMPLETE_FILE_EXISTS] uploadId={uploadId}, filePath={output_path}, fileSize={actual_size}")
 
             # 优化：直接使用 merged 文件作为唯一数据源，不再复制到 detection_images
             # 这样可以避免重复存储，节省磁盘空间
             logger.info(f"[SINGLE_STORAGE_OPTIMIZATION] uploadId={uploadId}, 使用merged文件作为唯一数据源: {output_path}")
-
-            # 第5步：将合并后的完整tif文件路径保存到后端的任务状态或上传记录中
             db_manager = get_db_manager()
             db_session = db_manager.get_session()
             try:
@@ -673,7 +732,6 @@ class BackgroundTaskManager:
                 },
             )
 
-            # 第1步：在合并函数出口强制打印日志
             logger.info(f"[MERGE_EXECUTING_COMPLETE] taskId={task_id}, uploadId={uploadId}, filePath={output_path}")
 
         except Exception as e:

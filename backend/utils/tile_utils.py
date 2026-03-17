@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Tuple, Optional, List, Dict, NamedTuple, Generator
 import logging
 
+from backend.utils.resource_monitor import ResourceMonitor
+
 logger = logging.getLogger(__name__)
 
 # 系统默认分块尺寸
@@ -339,14 +341,62 @@ class TilingService:
         Returns:
             (合并是否成功, 合并后的影像, 错误信息或成功消息)
         """
+        import sys
+        import time as _time
+
         try:
+            logger.info("开始执行图像合并 (merge_tiles)")
+            merge_start = _time.time()
+
             if not tiles or len(tiles) == 0:
                 return False, None, "分块列表为空"
+
+            logger.info(f"tile count: {len(tiles)}")
+            logger.info(f"output size: {image_width}x{image_height}, tile_size={tile_size}")
+
+            logger.info(f"检查 tiles 内容: {len(tiles)} 个")
+            invalid_tiles = [t for t in tiles if t is None or t.data is None]
+            if invalid_tiles:
+                logger.error(f"tiles contains invalid entries: {len(invalid_tiles)} 个")
+
+            seen_indices = set()
+            for tile in tiles:
+                if tile.tile_index in seen_indices:
+                    logger.error(f"发现重复 tile_index: {tile.tile_index}")
+                seen_indices.add(tile.tile_index)
 
             # 获取通道数
             num_channels = tiles[0].data.shape[2] if len(tiles[0].data.shape) == 3 else 1
 
+            tile_dtypes = set()
+            for tile in tiles:
+                tile_dtypes.add(str(tile.data.dtype))
+            if len(tile_dtypes) > 1:
+                logger.warning(f"tile dtype 不一致: {tile_dtypes}")
+
+            logger.info(f"output_width={image_width}, output_height={image_height}, num_channels={num_channels}")
+
             # 初始化合并后的影像
+            dtype = tiles[0].data.dtype
+            if num_channels == 1:
+                estimated_size = image_height * image_width * np.dtype(dtype).itemsize
+            else:
+                estimated_size = image_height * image_width * num_channels * np.dtype(dtype).itemsize
+
+            memory_info = ResourceMonitor.get_memory_usage()
+            available_memory = memory_info['available'] * 1024 * 1024  # MB -> bytes
+            logger.info(
+                f"内存检查: 可用={available_memory/1024/1024:.1f}MB, "
+                f"需要={estimated_size/1024/1024:.1f}MB"
+            )
+            if estimated_size > available_memory * 0.8:
+                error_msg = (
+                    f"内存不足: 需要 {estimated_size/1024/1024:.1f}MB, "
+                    f"可用 {available_memory/1024/1024:.1f}MB (使用率超过80%)"
+                )
+                logger.error(error_msg)
+                return False, None, error_msg
+
             if num_channels == 1:
                 merged_image = np.zeros(
                     (image_height, image_width),
@@ -358,9 +408,30 @@ class TilingService:
                     dtype=tiles[0].data.dtype,
                 )
 
+            logger.info(f"merged_image.nbytes={merged_image.nbytes} ({merged_image.nbytes / 1024 / 1024:.1f} MB)")
+            if merged_image.nbytes > 2 * 1024 * 1024 * 1024:
+                logger.warning("merged_image 超过 2GB，可能导致内存问题")
+
+            sorted_tiles = sorted(tiles, key=lambda t: t.tile_index)
+
             # 合并分块
-            for tile in tiles:
+            total_tiles = len(sorted_tiles)
+            log_interval = max(1, total_tiles // 20)  # 最多输出20次进度日志
+            for i, tile in enumerate(sorted_tiles):
                 y_start, y_end, x_start, x_end = tile.get_original_bounds()
+
+                # 只在关键节点输出日志
+                if i % log_interval == 0 or i == total_tiles - 1:
+                    progress = int((i + 1) / total_tiles * 100)
+                    logger.info(f"合并进度: {i+1}/{total_tiles} ({progress}%)")
+
+                # 确保 tile 不超出目标图边界
+                if y_end > image_height or x_end > image_width:
+                    logger.error(
+                        f"tile {tile.tile_index} 超出目标图边界: "
+                        f"bounds=({y_start},{y_end},{x_start},{x_end}), "
+                        f"target=({image_height},{image_width})"
+                    )
 
                 # 获取分块的有效数据部分（去除 padding）
                 if tile.is_padded:
@@ -377,15 +448,25 @@ class TilingService:
                 else:
                     merged_image[y_start:y_end, x_start:x_end, :] = tile_data
 
+            logger.info(f"tiles 总大小: {sys.getsizeof(tiles)} bytes")
+
+            merge_elapsed = _time.time() - merge_start
+            logger.info(f"merge time: {merge_elapsed:.2f}s")
+
+            if merge_elapsed > 300:
+                logger.warning(f"merge taking too long: {merge_elapsed:.2f}s > 300s")
+
             logger.info(
                 f"分块合并完成: {len(tiles)} 个分块, "
                 f"合并后影像尺寸={image_width}x{image_height}"
             )
 
+            logger.info("图像合并完成")
+
             return True, merged_image, "分块合并成功"
 
         except Exception as e:
-            logger.error(f"分块合并失败: {str(e)}")
+            logger.exception(f"分块合并失败: {e}")
             return False, None, f"分块合并失败: {str(e)}"
 
     @staticmethod

@@ -1,5 +1,5 @@
 """
-无监督病害木检测服务模块
+非监督病害木检测服务模块
 基于光谱、纹理和空间特征的传统非监督分类方法
 不使用深度学习模型，不依赖人工标注
 
@@ -9,6 +9,8 @@
 import numpy as np
 from typing import Tuple, Optional, Dict, List
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from skimage.color import rgb2gray
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
@@ -26,19 +28,24 @@ def _process_tile_for_parallel(args):
     """
     处理单个瓦片的模块级别函数
 
+    每个 worker 独立创建 service 实例，避免 multiprocessing pickle 问题。
+
     Args:
-        args: 包含 (service, tile, n_clusters, min_area, nodata_value) 的元组
+        args: 包含 (tile, n_clusters, min_area, nodata_value, r_threshold_factor, g_threshold_factor, contrast_threshold_factor) 的元组
 
     Returns:
         处理结果字典或错误字典
     """
-    service, tile, n_clusters, min_area, nodata_value = args
+    tile, n_clusters, min_area, nodata_value, r_threshold_factor, g_threshold_factor, contrast_threshold_factor = args
     try:
+        service = UnsupervisedDiseaseDetectionService()
         success, result, msg = service._process_single_tile(
-            tile, n_clusters, min_area, nodata_value
+            tile, n_clusters, min_area, nodata_value,
+            r_threshold_factor, g_threshold_factor, contrast_threshold_factor
         )
         if not success:
             return {"error": msg, "tile_index": tile.tile_index}
+        logger.info(f"tile {tile.tile_index} 完成")
         return result
     except Exception as e:
         logger.error(f"瓦片 {tile.tile_index} 处理异常: {str(e)}")
@@ -72,6 +79,25 @@ class UnsupervisedDiseaseDetectionService:
         try:
             if image_data is None or image_data.size == 0:
                 return False, None, "影像数据为空"
+
+            # 验证nodata_value的有效性
+            if nodata_value is not None:
+                # 检查nodata_value是否在影像数据范围内
+                data_min = np.nanmin(image_data)
+                data_max = np.nanmax(image_data)
+                if nodata_value < data_min or nodata_value > data_max:
+                    logger.warning(
+                        f"nodata_value={nodata_value} 超出影像数据范围 [{data_min}, {data_max}]，"
+                        "可能无法正确处理NoData像元"
+                    )
+
+                # 检查nodata_value是否会导致过多的像元被标记为NoData
+                nodata_ratio = np.sum(image_data == nodata_value) / image_data.size
+                if nodata_ratio > 0.5:
+                    logger.warning(
+                        f"超过50%的像元被标记为NoData (nodata_value={nodata_value}, ratio={nodata_ratio:.2%})，"
+                        "可能影响检测结果"
+                    )
 
             # 转换为浮点型数组
             normalized_data = image_data.astype(np.float32)
@@ -265,11 +291,22 @@ class UnsupervisedDiseaseDetectionService:
             # 特征融合
             feature_matrix = np.hstack([spectral_features, texture_features])
 
+            # 记录特征矩阵内存使用
+            feature_matrix_mb = feature_matrix.nbytes / 1024 / 1024
+            logger.info(f"特征矩阵构建完成，内存占用: {feature_matrix_mb:.2f}MB")
+
             # 及时释放单个特征矩阵
             del spectral_features, texture_features
             gc.collect()
 
-            # 第一步：清理无效值（NaN、Inf）
+            # 检查可用内存
+            memory_info = ResourceMonitor.get_memory_usage()
+            available_memory_mb = memory_info['available']
+            logger.info(f"可用内存: {available_memory_mb:.2f}MB")
+
+            if available_memory_mb < 512:  # 小于512MB时警告
+                logger.warning(f"可用内存不足（{available_memory_mb:.2f}MB），可能导致内存问题")
+
             nan_mask = np.isnan(feature_matrix)
             inf_mask = np.isinf(feature_matrix)
             invalid_mask = nan_mask | inf_mask
@@ -283,7 +320,6 @@ class UnsupervisedDiseaseDetectionService:
                 # 将无效值替换为0
                 feature_matrix[invalid_mask] = 0
 
-            # 第二步：裁剪极端值，避免数值溢出
             # 使用百分位数裁剪，保留 [1%, 99%] 范围内的值
             for col_idx in range(feature_matrix.shape[1]):
                 col_data = feature_matrix[:, col_idx]
@@ -299,7 +335,6 @@ class UnsupervisedDiseaseDetectionService:
 
             logger.info("特征矩阵极端值裁剪完成")
 
-            # 第三步：特征标准化（零均值、单位方差）
             # 使用 RobustScaler 替代 StandardScaler，更鲁棒
             from sklearn.preprocessing import RobustScaler
             robust_scaler = RobustScaler()
@@ -333,7 +368,8 @@ class UnsupervisedDiseaseDetectionService:
             return False, None, f"特征矩阵构建失败: {str(e)}"
 
     def kmeans_clustering(
-        self, feature_matrix: np.ndarray, n_clusters: int = 4
+        self, feature_matrix: np.ndarray, n_clusters: int = 4,
+        random_state: int = 42, n_init: int = 10, max_iter: int = 300
     ) -> Tuple[bool, Optional[np.ndarray], Optional[np.ndarray], str]:
         """
         第四步 4.1：K-means 聚类
@@ -341,6 +377,9 @@ class UnsupervisedDiseaseDetectionService:
         Args:
             feature_matrix: 标准化后的特征矩阵 (N, D)
             n_clusters: 聚类类别数 K
+            random_state: 随机种子（默认42）
+            n_init: 初始化次数（默认10）
+            max_iter: 最大迭代次数（默认300）
 
         Returns:
             (处理是否成功, 聚类标签, 聚类中心, 错误信息或成功消息)
@@ -373,10 +412,10 @@ class UnsupervisedDiseaseDetectionService:
                 # 使用 'k-means++' 初始化方法提高稳定性
                 kmeans = KMeans(
                     n_clusters=n_clusters,
-                    random_state=42,
-                    n_init=10,
+                    random_state=random_state,
+                    n_init=n_init,
                     init='k-means++',
-                    max_iter=300,
+                    max_iter=max_iter,
                     tol=1e-4
                 )
                 labels = kmeans.fit_predict(feature_matrix_clipped)
@@ -397,6 +436,9 @@ class UnsupervisedDiseaseDetectionService:
         labels: np.ndarray,
         centers: np.ndarray,
         spectral_features: np.ndarray,
+        r_threshold_factor: float = 1.1,
+        g_threshold_factor: float = 0.9,
+        contrast_threshold_factor: float = 1.1,
     ) -> Tuple[bool, Optional[np.ndarray], str]:
         """
         第五步：病害木候选类别判定
@@ -411,6 +453,9 @@ class UnsupervisedDiseaseDetectionService:
             labels: 聚类标签
             centers: 聚类中心
             spectral_features: 光谱特征矩阵
+            r_threshold_factor: 红波段阈值因子（默认1.1，表示高于均值10%）
+            g_threshold_factor: 绿波段阈值因子（默认0.9，表示低于均值10%）
+            contrast_threshold_factor: 对比度阈值因子（默认1.1，表示高于均值10%）
 
         Returns:
             (处理是否成功, 病害木候选像元标记, 错误信息或成功消息)
@@ -439,9 +484,9 @@ class UnsupervisedDiseaseDetectionService:
                 contrast_threshold = np.mean(centers[:, 6])
 
                 is_disease_candidate = (
-                    R_mean > R_threshold * 1.1
-                    and G_mean < G_threshold * 0.9
-                    and contrast_mean > contrast_threshold * 1.1
+                    R_mean > R_threshold * r_threshold_factor
+                    and G_mean < G_threshold * g_threshold_factor
+                    and contrast_mean > contrast_threshold * contrast_threshold_factor
                 )
 
                 if is_disease_candidate:
@@ -465,6 +510,8 @@ class UnsupervisedDiseaseDetectionService:
         candidate_mask: np.ndarray,
         image_shape: Tuple[int, int],
         min_area: int = 50,
+        task_manager=None,
+        task_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[np.ndarray], Optional[List[Dict]], str]:
         """
         第六步：空间后处理
@@ -478,6 +525,8 @@ class UnsupervisedDiseaseDetectionService:
             candidate_mask: 病害木候选像元标记 (N,)
             image_shape: 影像形状 (H, W)
             min_area: 最小斑块面积阈值
+            task_manager: 任务管理器（用于进度更新）
+            task_id: 任务ID（用于进度跟踪）
 
         Returns:
             (处理是否成功, 处理后的掩膜, 病害木中心点位列表, 错误信息或成功消息)
@@ -497,7 +546,16 @@ class UnsupervisedDiseaseDetectionService:
             processed_mask = np.zeros_like(mask_2d)
             center_points = []
 
+            # 计算进度更新间隔（每处理5%的区域更新一次进度，避免被误判为"卡住"）
+            log_interval = max(1, num_features // 20)
+            base_progress = 75  # 基础进度（开始时的进度）
+
             for region_id in range(1, num_features + 1):
+                # 检查停止标志
+                if task_manager and task_manager.is_stop_requested(task_id):
+                    logger.info(f"[{task_id}] 检测任务被停止（空间后处理阶段，区域{region_id}/{num_features}）")
+                    return False, None, None, "检测任务被用户停止"
+
                 region_mask = labeled_array == region_id
                 region_area = np.sum(region_mask)
 
@@ -517,6 +575,15 @@ class UnsupervisedDiseaseDetectionService:
                         }
                     )
 
+                # 每处理一定数量的区域后更新进度（75% -> 90%）
+                if region_id % log_interval == 0 and task_manager and task_id:
+                    progress = base_progress + int((region_id / num_features) * 15)
+                    task_manager.update_progress(
+                        task_id,
+                        progress,
+                        f"提取中心点: {region_id}/{num_features}"
+                    )
+
             logger.info(
                 f"空间后处理完成，保留斑块数: {len(center_points)}, "
                 f"最小面积阈值: {min_area}"
@@ -533,6 +600,9 @@ class UnsupervisedDiseaseDetectionService:
         n_clusters: int = 4,
         min_area: int = 50,
         nodata_value: Optional[float] = None,
+        r_threshold_factor: float = 1.1,
+        g_threshold_factor: float = 0.9,
+        contrast_threshold_factor: float = 1.1,
     ) -> Tuple[bool, Optional[Dict], str]:
         """
         处理单个分块
@@ -542,6 +612,9 @@ class UnsupervisedDiseaseDetectionService:
             n_clusters: K-means 聚类类别数
             min_area: 最小斑块面积阈值
             nodata_value: NoData 像元值
+            r_threshold_factor: 红波段阈值因子（默认1.1，表示高于均值10%）
+            g_threshold_factor: 绿波段阈值因子（默认0.9，表示低于均值10%）
+            contrast_threshold_factor: 对比度阈值因子（默认1.1，表示高于均值10%）
 
         Returns:
             (处理是否成功, 处理结果字典, 错误信息或成功消息)
@@ -592,7 +665,8 @@ class UnsupervisedDiseaseDetectionService:
             # 第五步：病害木候选类别判定
             logger.debug(f"分块 {tile.tile_index}: 开始病害木候选类别判定")
             success, candidate_mask, msg = self.identify_disease_candidates(
-                normalized_image, labels, centers, spectral_features
+                normalized_image, labels, centers, spectral_features,
+                r_threshold_factor, g_threshold_factor, contrast_threshold_factor
             )
             if not success:
                 logger.error(f"分块 {tile.tile_index}: 候选类别判定失败 - {msg}")
@@ -618,14 +692,24 @@ class UnsupervisedDiseaseDetectionService:
                 }
                 original_center_points.append(original_point)
 
+            # 将 tile mask 写入磁盘，避免通过 IPC 返回大型 numpy 数组
+            tiles_mask_dir = os.path.join("storage", "tiles_mask")
+            os.makedirs(tiles_mask_dir, exist_ok=True)
+            output_path = os.path.join(tiles_mask_dir, f"tile_mask_{tile.tile_index}.npy")
+            np.save(output_path, processed_mask.astype(np.uint8))
+
             result = {
                 "tile_index": tile.tile_index,
                 "tile_row": tile.row_index,
                 "tile_col": tile.col_index,
-                "candidate_mask": processed_mask,
+                "mask_path": output_path,
                 "center_points": original_center_points,
                 "n_clusters": n_clusters,
                 "n_candidates": len(original_center_points),
+                "offset_y": tile.offset_y,
+                "offset_x": tile.offset_x,
+                "tile_height": tile.tile_info.tile_height,
+                "tile_width": tile.tile_info.tile_width,
             }
 
             logger.info(
@@ -639,6 +723,199 @@ class UnsupervisedDiseaseDetectionService:
             ResourceMonitor.log_resource_status(f"分块 {tile.tile_index} 处理异常")
             return False, None, f"分块检测失败: {str(e)}"
 
+    def _merge_tile_masks(
+        self,
+        valid_results: List[Dict],
+        image_height: int,
+        image_width: int,
+        task_manager=None,
+        task_id: Optional[str] = None,
+    ) -> Tuple[bool, Optional[np.ndarray], str]:
+        """
+        合并所有 tile mask 文件为全局 mask
+
+        Args:
+            valid_results: 有效的 tile 处理结果列表
+            image_height: 原始影像高度
+            image_width: 原始影像宽度
+            task_manager: 任务管理器（用于更新进度）
+            task_id: 任务ID（用于进度跟踪）
+
+        Returns:
+            (合并是否成功, 合并后的全局 mask, 错误信息或成功消息)
+        """
+        import sys
+        import time as _time
+
+        try:
+            logger.info("开始执行图像合并")
+            logger.info(f"tile count: {len(valid_results)}")
+            logger.info(f"output size: {image_width}x{image_height}")
+            merge_start = _time.time()
+
+            logger.info(f"检查 tile_results: {len(valid_results)} 个")
+            invalid_entries = [r for r in valid_results if r is None or "mask_path" not in r]
+            if invalid_entries:
+                logger.error(f"tile_results contains invalid entries: {len(invalid_entries)} 个")
+
+            tile_dtypes = set()
+            tile_shapes = []
+
+            seen_indices = set()
+            seen_offsets = set()
+            for result in valid_results:
+                idx = result.get("tile_index")
+                if idx in seen_indices:
+                    logger.error(f"发现重复 tile_index: {idx}")
+                seen_indices.add(idx)
+                offset_key = (result.get("offset_y"), result.get("offset_x"))
+                if offset_key in seen_offsets:
+                    logger.error(f"发现重复 offset: {offset_key}")
+                seen_offsets.add(offset_key)
+
+            logger.info(f"output_width={image_width}, output_height={image_height}")
+
+            estimated_size = image_height * image_width * np.dtype(np.uint8).itemsize
+            memory_info = ResourceMonitor.get_memory_usage()
+            available_memory = memory_info['available'] * 1024 * 1024  # MB -> bytes
+            logger.info(
+                f"内存检查: 可用={available_memory/1024/1024:.1f}MB, "
+                f"需要={estimated_size/1024/1024:.1f}MB"
+            )
+            if estimated_size > available_memory * 0.8:
+                error_msg = (
+                    f"内存不足: 需要 {estimated_size/1024/1024:.1f}MB, "
+                    f"可用 {available_memory/1024/1024:.1f}MB (使用率超过80%)"
+                )
+                logger.error(error_msg)
+                return False, None, error_msg
+
+            global_mask = np.zeros((image_height, image_width), dtype=np.uint8)
+            logger.info(f"global_mask.nbytes={global_mask.nbytes} ({global_mask.nbytes / 1024 / 1024:.1f} MB)")
+            if global_mask.nbytes > 2 * 1024 * 1024 * 1024:
+                logger.warning("global_mask 超过 2GB，可能导致内存问题")
+
+            total_tiles = len(valid_results)
+            sorted_results = sorted(valid_results, key=lambda r: r["tile_index"])
+            log_interval = max(1, total_tiles // 20)  # 最多输出20次进度日志
+
+            for i, result in enumerate(sorted_results):
+                tile_index = result["tile_index"]
+                mask_path = result["mask_path"]
+
+                # 只在关键节点输出日志
+                if i % log_interval == 0 or i == total_tiles - 1:
+                    progress = int((i + 1) / total_tiles * 100)
+                    logger.info(f"合并进度: {i+1}/{total_tiles} ({progress}%)")
+                    # 更新任务进度（70% -> 80%）
+                    if task_manager and task_id:
+                        merge_progress = 70 + int((i + 1) / total_tiles * 10)
+                        task_manager.update_progress(
+                            task_id,
+                            merge_progress,
+                            f"合并分块结果: {i+1}/{total_tiles}"
+                        )
+
+                # 检查 tile 文件是否真实存在
+                if not os.path.exists(mask_path):
+                    logger.error(f"tile file missing: {mask_path}")
+                    continue
+
+                try:
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(np.load, mask_path)
+                        tile_mask = future.result(timeout=30)  # 30秒超时
+                except FuturesTimeoutError:
+                    logger.error(f"读取文件超时（30秒）: {mask_path}")
+                    continue
+                except Exception as load_err:
+                    logger.error(f"读取文件失败: {mask_path}, 错误: {str(load_err)}")
+                    continue
+
+                tile_dtypes.add(str(tile_mask.dtype))
+                tile_shapes.append(tile_mask.shape)
+
+                offset_y = result["offset_y"]
+                offset_x = result["offset_x"]
+                tile_h = result["tile_height"]
+                tile_w = result["tile_width"]
+
+                # 步骤7: 确保 tile 不超出目标图边界
+                if offset_y + tile_h > image_height or offset_x + tile_w > image_width:
+                    logger.error(
+                        f"tile {tile_index} 超出目标图边界: "
+                        f"offset=({offset_y},{offset_x}), size=({tile_h},{tile_w}), "
+                        f"target=({image_height},{image_width})"
+                    )
+
+                # 只取有效区域（去除 padding 部分）
+                valid_mask = tile_mask[:tile_h, :tile_w]
+
+                global_mask[
+                    offset_y : offset_y + tile_h,
+                    offset_x : offset_x + tile_w,
+                ] = valid_mask
+
+            if len(tile_dtypes) > 1:
+                logger.warning(f"tile dtype 不一致: {tile_dtypes}")
+
+            logger.info(f"tile_results 总大小: {sys.getsizeof(valid_results)} bytes")
+
+            merge_elapsed = _time.time() - merge_start
+            logger.info(f"merge time: {merge_elapsed:.2f}s")
+
+            if merge_elapsed > 300:
+                logger.warning(f"merge taking too long: {merge_elapsed:.2f}s > 300s")
+
+            logger.info("图像合并完成")
+
+            return True, global_mask, "tile mask 合并成功"
+
+        except Exception as e:
+            logger.exception(f"tile mask 合并失败: {e}")
+            return False, None, f"tile mask 合并失败: {str(e)}"
+
+    def _cleanup_tile_masks(self, valid_results: List[Dict]) -> None:
+        """清理临时 tile mask 文件"""
+        if not valid_results:
+            return
+
+        cleaned_count = 0
+        failed_files = []
+
+        try:
+            for result in valid_results:
+                mask_path = result.get("mask_path")
+                if mask_path and os.path.exists(mask_path):
+                    try:
+                        os.remove(mask_path)
+                        cleaned_count += 1
+                    except Exception as file_err:
+                        failed_files.append(mask_path)
+                        logger.warning(f"清理文件失败: {mask_path}, 错误: {str(file_err)}")
+
+            # 尝试删除目录
+            tiles_mask_dir = os.path.join("storage", "tiles_mask")
+            if os.path.exists(tiles_mask_dir) and not os.listdir(tiles_mask_dir):
+                try:
+                    os.rmdir(tiles_mask_dir)
+                except Exception as dir_err:
+                    logger.warning(f"删除目录失败: {tiles_mask_dir}, 错误: {str(dir_err)}")
+
+            # 记录清理结果
+            if cleaned_count > 0:
+                logger.info(f"临时文件清理完成: 成功 {cleaned_count}/{len(valid_results)} 个文件")
+
+            if failed_files:
+                logger.error(f"临时文件清理失败 {len(failed_files)} 个文件:")
+                for file_path in failed_files[:5]:  # 最多显示5个
+                    logger.error(f"  - {file_path}")
+                if len(failed_files) > 5:
+                    logger.error(f"  ... 还有 {len(failed_files) - 5} 个文件")
+
+        except Exception as e:
+            logger.error(f"清理 tile mask 文件时出现异常: {e}")
+
     def detect_on_tiled_image(
         self,
         image_data: np.ndarray,
@@ -648,7 +925,10 @@ class UnsupervisedDiseaseDetectionService:
         tile_size: int = DEFAULT_TILE_SIZE,
         padding_mode: str = "pad",
         use_parallel: bool = True,
-        num_workers: Optional[int] = 8,
+        num_workers: Optional[int] = None,
+        r_threshold_factor: float = 1.1,
+        g_threshold_factor: float = 0.9,
+        contrast_threshold_factor: float = 1.1,
         task_manager=None,
         task_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[Dict], str]:
@@ -679,12 +959,20 @@ class UnsupervisedDiseaseDetectionService:
                 return False, None, "影像数据为空"
 
             H, W, B = image_data.shape
+
+            tile_size = min(tile_size, 1024)
+
+            import multiprocessing as mp
+            if num_workers is None:
+                num_workers = min(DEFAULT_PARALLEL_WORKERS, mp.cpu_count() - 1)
+            num_workers = max(1, min(num_workers, mp.cpu_count() - 1))
+
             logger.info(
                 f"[{task_id}] 开始分块检测: 影像尺寸={W}x{H}, 分块尺寸={tile_size}x{tile_size}"
             )
+            logger.info(f"[{task_id}] 并行参数: num_workers={num_workers}, tile_size={tile_size}")
             ResourceMonitor.log_resource_status(f"分块检测开始 [{task_id}]")
 
-            # 第一步：生成分块
             logger.debug(f"[{task_id}] 生成分块中...")
             success, tiles, msg = TilingService.generate_tiles(
                 image_data,
@@ -698,9 +986,9 @@ class UnsupervisedDiseaseDetectionService:
 
             logger.info(f"[{task_id}] 已生成 {len(tiles)} 个分块")
 
-            # 第二步：处理分块
             if use_parallel:
                 # 并行处理
+                logger.info(f"[{task_id}] 开始并行处理 tiles: {len(tiles)}")
                 logger.info(f"[{task_id}] 使用并行处理分块，工作进程数={num_workers}")
                 ResourceMonitor.log_resource_status(f"并行处理分块开始 [{task_id}]")
 
@@ -709,40 +997,47 @@ class UnsupervisedDiseaseDetectionService:
                     logger.info(f"[{task_id}] 检测任务被停止（并行处理前）")
                     return False, None, "检测任务被用户停止"
 
-                # 为每个瓦片准备参数元组
+                # 为每个瓦片准备参数元组（不传递 self，worker 内部创建 service）
                 tile_args = [
-                    (self, tile, n_clusters, min_area, nodata_value)
+                    (tile, n_clusters, min_area, nodata_value, r_threshold_factor, g_threshold_factor, contrast_threshold_factor)
                     for tile in tiles
                 ]
 
-                success, tile_results, errors, msg = (
-                    ParallelProcessingService.process_tiles_parallel(
-                        tile_args,
-                        _process_tile_for_parallel,
-                        num_workers=num_workers,
-                        error_handling="log",
-                        task_manager=task_manager,
-                        task_id=task_id,
+                try:
+                    success, tile_results, errors, msg = (
+                        ParallelProcessingService.process_tiles_parallel(
+                            tile_args,
+                            _process_tile_for_parallel,
+                            num_workers=num_workers,
+                            error_handling="log",
+                            task_manager=task_manager,
+                            task_id=task_id,
+                        )
                     )
-                )
 
-                if not success and len(tile_results) == 0:
-                    logger.error(f"[{task_id}] 并行处理失败: {msg}")
-                    return False, None, msg
+                    if not success and (tile_results is None or len(tile_results) == 0):
+                        raise RuntimeError(f"并行处理失败: {msg}")
 
-                # 过滤掉错误结果
-                valid_results = [r for r in tile_results if r is not None and "error" not in r]
-                logger.info(
-                    f"[{task_id}] 并行处理完成: {len(valid_results)} 个成功, {len(errors)} 个失败"
-                )
-                ResourceMonitor.log_resource_status(f"并行处理分块完成 [{task_id}]")
+                    # 过滤掉错误结果
+                    valid_results = [r for r in tile_results if r is not None and "error" not in r]
+                    logger.info(
+                        f"[{task_id}] 并行处理完成: {len(valid_results)} 个成功, {len(errors)} 个失败"
+                    )
+                    ResourceMonitor.log_resource_status(f"并行处理分块完成 [{task_id}]")
+
+                except Exception as parallel_error:
+                    logger.warning(
+                        f"[{task_id}] 并行处理失败 ({parallel_error})，自动切换为顺序执行"
+                    )
+                    use_parallel = False
 
                 # 更新进度到 60%（处理分块完成）
                 if task_manager and task_id:
                     task_manager.update_progress(
                         task_id, 60, f"分块处理完成: {len(valid_results)}/{len(tiles)} 个成功"
                     )
-            else:
+
+            if not use_parallel:
                 # 顺序处理
                 logger.info(f"[{task_id}] 使用顺序处理分块")
                 valid_results = []
@@ -754,7 +1049,8 @@ class UnsupervisedDiseaseDetectionService:
 
                     logger.debug(f"[{task_id}] 处理分块 {tile_idx + 1}/{len(tiles)}")
                     success, result, msg = self._process_single_tile(
-                        tile, n_clusters, min_area, nodata_value
+                        tile, n_clusters, min_area, nodata_value,
+                        r_threshold_factor, g_threshold_factor, contrast_threshold_factor
                     )
                     if success:
                         valid_results.append(result)
@@ -770,15 +1066,104 @@ class UnsupervisedDiseaseDetectionService:
                 logger.error(f"[{task_id}] 所有分块处理失败")
                 return False, None, "所有分块处理失败"
 
-            # 第三步：合并结果
-            logger.debug(f"[{task_id}] 合并分块处理结果")
+            # 确认 cleanup 没在 merge 前删除 tile
+            tiles_mask_dir = os.path.join("storage", "tiles_mask")
+            if os.path.exists(tiles_mask_dir):
+                existing_files = os.listdir(tiles_mask_dir)
+                logger.info(f"[{task_id}] merge 前 tiles_mask 目录文件数: {len(existing_files)}")
+            else:
+                logger.warning(f"[{task_id}] merge 前 tiles_mask 目录不存在!")
+
+            logger.info(f"[{task_id}] merge 输出目录: {os.getcwd()}")
+            import shutil
+            disk_usage = shutil.disk_usage(os.getcwd())
+            logger.info(
+                f"[{task_id}] 磁盘状态: 总计={disk_usage.total / 1024 / 1024 / 1024:.1f}GB, "
+                f"已用={disk_usage.used / 1024 / 1024 / 1024:.1f}GB, "
+                f"可用={disk_usage.free / 1024 / 1024 / 1024:.1f}GB"
+            )
+            if disk_usage.free < 1024 * 1024 * 1024:  # < 1GB
+                logger.warning(f"[{task_id}] 磁盘可用空间不足 1GB!")
+
+            logger.info(f"[{task_id}] 开始合并分块 mask")
+            success, global_mask, msg = self._merge_tile_masks(
+                valid_results, H, W, task_manager, task_id
+            )
+            if not success:
+                logger.error(f"[{task_id}] 合并 tile mask 失败: {msg}")
+                self._cleanup_tile_masks(valid_results)
+                return False, None, msg
+
+            # 更新进度到 80%（合并完成）
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 80, "合并分块结果完成")
+
+            logger.info(f"[{task_id}] 合并分块结果完成")
+
+            # 第四步：在合并后的全局 mask 上进行目标提取
+            # 连通域分析 + 面积筛选 + 中心点提取
+
+            # 更新进度到 85%（开始连通域分析）
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 85, "进行连通域分析")
+
+            labeled_array, num_features = label(global_mask)
+            logger.info(f"[{task_id}] 连通域分析完成，共 {num_features} 个特征区域")
+
+            # 更新进度到 90%（开始目标提取）
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 90, f"提取目标中心点 (共{num_features}个区域)")
+
             all_center_points = []
-            for tile_result in valid_results:
-                all_center_points.extend(tile_result["center_points"])
+            # 计算进度更新间隔（每处理5%的区域更新一次进度，避免被误判为"卡住"）
+            log_interval = max(1, num_features // 20)
 
-            logger.info(f"[{task_id}] 共检测到 {len(all_center_points)} 个候选点")
+            for region_id in range(1, num_features + 1):
+                # 检查停止标志
+                if task_manager and task_manager.is_stop_requested(task_id):
+                    logger.info(f"[{task_id}] 检测任务被停止（中心点提取阶段，区域{region_id}/{num_features}）")
+                    self._cleanup_tile_masks(valid_results)
+                    return False, None, "检测任务被用户停止"
 
-            # 第四步：结果输出
+                region_mask = labeled_array == region_id
+                region_area = np.sum(region_mask)
+                if region_area >= min_area:
+                    coords = np.where(region_mask)
+                    center_y = float(np.mean(coords[0]))
+                    center_x = float(np.mean(coords[1]))
+                    all_center_points.append({
+                        "x": center_x,
+                        "y": center_y,
+                        "area": int(region_area),
+                    })
+
+                # 每处理一定数量的区域后更新进度（90% -> 95%）
+                if region_id % log_interval == 0:
+                    progress = 90 + int((region_id / num_features) * 5)
+                    if task_manager and task_id:
+                        task_manager.update_progress(
+                            task_id,
+                            progress,
+                            f"提取目标中心点: {region_id}/{num_features}"
+                        )
+
+            logger.info(f"[{task_id}] 全局目标提取完成，共 {len(all_center_points)} 个候选点")
+
+            # 更新进度到 95%（开始清理临时文件）
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 95, "清理临时文件")
+
+            # 清理临时 tile mask 文件（步骤12：cleanup 异常保护）
+            try:
+                self._cleanup_tile_masks(valid_results)
+            except Exception as e:
+                logger.warning(f"cleanup skipped: {e}")
+
+            # 更新进度到 100%（准备返回结果）
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 100, "准备返回结果")
+
+            # 第五步：结果输出
             result = {
                 "center_points": all_center_points,
                 "n_tiles": len(tiles),
@@ -791,8 +1176,13 @@ class UnsupervisedDiseaseDetectionService:
                 "description": "基于 1024×1024 分块的光谱、纹理和空间特征无监督病害木检测",
             }
 
+            logger.info("非监督分类任务完成")
             logger.info(f"[{task_id}] 分块检测完成")
             ResourceMonitor.log_resource_status(f"分块检测完成 [{task_id}]")
+
+            if task_manager and task_id:
+                task_manager.update_status(task_id, "completed")
+
             return True, result, "分块检测成功"
 
         except Exception as e:
@@ -806,6 +1196,9 @@ class UnsupervisedDiseaseDetectionService:
         n_clusters: int = 4,
         min_area: int = 50,
         nodata_value: Optional[float] = None,
+        r_threshold_factor: float = 1.1,
+        g_threshold_factor: float = 0.9,
+        contrast_threshold_factor: float = 1.1,
         task_manager=None,
         task_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[Dict], str]:
@@ -823,6 +1216,9 @@ class UnsupervisedDiseaseDetectionService:
             n_clusters: K-means 聚类类别数
             min_area: 最小斑块面积阈值
             nodata_value: NoData 像元值
+            r_threshold_factor: 红波段阈值因子（默认1.1，表示高于均值10%）
+            g_threshold_factor: 绿波段阈值因子（默认0.9，表示低于均值10%）
+            contrast_threshold_factor: 对比度阈值因子（默认1.1，表示高于均值10%）
             task_manager: 任务管理器（用于更新进度）
             task_id: 任务ID（用于进度跟踪）
 
@@ -850,7 +1246,10 @@ class UnsupervisedDiseaseDetectionService:
                     min_area=min_area,
                     nodata_value=nodata_value,
                     use_parallel=True,
-                    num_workers=8,
+                    num_workers=None,
+                    r_threshold_factor=r_threshold_factor,
+                    g_threshold_factor=g_threshold_factor,
+                    contrast_threshold_factor=contrast_threshold_factor,
                     task_manager=task_manager,
                     task_id=task_id,
                 )
@@ -858,8 +1257,9 @@ class UnsupervisedDiseaseDetectionService:
             # 小影像使用单线程处理
             logger.info(f"[{task_id}] 影像尺寸较小 ({W}×{H})，使用单线程处理")
 
-            # 第一步：影像归一化
-            logger.debug(f"[{task_id}] 第一步: 影像归一化")
+            logger.debug(f"[{task_id}] 影像归一化")
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 10, "影像归一化中")
             success, normalized_image, msg = self.normalize_image(
                 image_data, nodata_value
             )
@@ -872,8 +1272,9 @@ class UnsupervisedDiseaseDetectionService:
                 logger.info(f"[{task_id}] 检测任务被停止（影像归一化后）")
                 return False, None, "检测任务被用户停止"
 
-            # 第二步和第三步：特征构建与标准化
-            logger.debug(f"[{task_id}] 第二步和第三步: 特征构建与标准化")
+            logger.debug(f"[{task_id}] 特征构建与标准化")
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 30, "构建和标准化特征")
             success, feature_matrix, msg = self.construct_feature_matrix(
                 normalized_image
             )
@@ -886,8 +1287,9 @@ class UnsupervisedDiseaseDetectionService:
                 logger.info(f"[{task_id}] 检测任务被停止（特征构建后）")
                 return False, None, "检测任务被用户停止"
 
-            # 第四步：K-means 聚类
-            logger.debug(f"[{task_id}] 第四步: K-means 聚类")
+            logger.debug(f"[{task_id}] K-means 聚类")
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 50, "执行K-means聚类")
             success, labels, centers, msg = self.kmeans_clustering(
                 feature_matrix, n_clusters
             )
@@ -902,6 +1304,8 @@ class UnsupervisedDiseaseDetectionService:
 
             # 提取光谱特征用于候选类别判定
             logger.debug(f"[{task_id}] 提取光谱特征")
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 60, "提取光谱特征")
             success, spectral_features, msg = self.extract_spectral_features(
                 normalized_image
             )
@@ -909,10 +1313,12 @@ class UnsupervisedDiseaseDetectionService:
                 logger.error(f"[{task_id}] 光谱特征提取失败: {msg}")
                 return False, None, msg
 
-            # 第五步：病害木候选类别判定
-            logger.debug(f"[{task_id}] 第五步: 病害木候选类别判定")
+            logger.debug(f"[{task_id}] 病害木候选类别判定")
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 65, "判定病害木候选类别")
             success, candidate_mask, msg = self.identify_disease_candidates(
-                normalized_image, labels, centers, spectral_features
+                normalized_image, labels, centers, spectral_features,
+                r_threshold_factor, g_threshold_factor, contrast_threshold_factor
             )
             if not success:
                 logger.error(f"[{task_id}] 候选类别判定失败: {msg}")
@@ -923,17 +1329,20 @@ class UnsupervisedDiseaseDetectionService:
                 logger.info(f"[{task_id}] 检测任务被停止（候选类别判定后）")
                 return False, None, "检测任务被用户停止"
 
-            # 第六步：空间后处理
-            logger.debug(f"[{task_id}] 第六步: 空间后处理")
+            logger.debug(f"[{task_id}] 空间后处理")
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 75, "进行空间后处理")
             success, processed_mask, center_points, msg = self.spatial_postprocessing(
-                candidate_mask, (H, W), min_area
+                candidate_mask, (H, W), min_area, task_manager, task_id
             )
             if not success:
                 logger.error(f"[{task_id}] 空间后处理失败: {msg}")
                 return False, None, msg
 
-            # 第七步：结果输出
-            logger.debug(f"[{task_id}] 第七步: 结果输出")
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 90, "准备返回结果")
+
+            logger.debug(f"[{task_id}] 结果输出")
             result = {
                 "candidate_mask": processed_mask,
                 "center_points": center_points,
@@ -948,8 +1357,15 @@ class UnsupervisedDiseaseDetectionService:
             del spectral_features, candidate_mask, processed_mask
             gc.collect()
 
+            # 步骤19：最终任务完成日志
+            logger.info("非监督分类任务完成")
             logger.info(f"[{task_id}] 无监督检测完成，发现 {len(center_points)} 个候选点")
             ResourceMonitor.log_resource_status(f"无监督检测完成 [{task_id}]")
+
+            # 步骤13：任务结束时强制更新状态
+            if task_manager and task_id:
+                task_manager.update_status(task_id, "completed")
+
             return True, result, "无监督病害木检测成功"
 
         except Exception as e:
