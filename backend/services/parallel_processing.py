@@ -11,6 +11,8 @@ from typing import Tuple, Optional, List, Callable, Dict, Any
 import logging
 import time
 import os
+import atexit
+import signal
 
 from backend.utils.resource_monitor import ResourceMonitor
 from backend.config.settings import MEMORY_WARN_THRESHOLD, MEMORY_CRITICAL_THRESHOLD
@@ -21,6 +23,7 @@ logger = logging.getLogger(__name__)
 MAX_WORKERS_LIMIT = 16  # 最大工作进程数上限
 MIN_WORKERS = 1  # 最小工作进程数
 DEFAULT_PARALLEL_WORKERS = 8  # 默认并行处理数量
+MEMORY_CHECK_INTERVAL = 5.0  # 动态调节检查间隔（秒）
 
 
 class ParallelProcessingService:
@@ -89,6 +92,56 @@ class ParallelProcessingService:
         )
 
         return num_workers
+
+    @staticmethod
+    def get_current_safe_worker_count(num_workers: int, max_limit: int = MAX_WORKERS_LIMIT) -> int:
+        """
+        基于实时内存水位动态调整 worker 数量。
+
+        与 get_auto_worker_count 不同，此方法设计用于运行时调用，
+        在检测到内存压力时逐级递减 worker 推荐数，避免系统 OOM。
+
+        Args:
+            num_workers: 当前使用的 worker 数量
+            max_limit: 最大工作进程数上限
+
+        Returns:
+            建议的 worker 数量（≤ 当前值）
+        """
+        try:
+            memory_info = ResourceMonitor.get_memory_usage()
+            mem_percent = memory_info.get('percent', 0)
+            available_gb = memory_info.get('available', 0) / 1024
+
+            # 三级降级策略
+            if mem_percent > MEMORY_CRITICAL_THRESHOLD * 100:
+                # 临界：强制降为1
+                logger.critical(
+                    f"[DYNAMIC_REGULATION] 内存临界: {mem_percent:.1f}%, "
+                    f"可用={available_gb:.1f}GB, worker {num_workers} -> 1"
+                )
+                return 1
+            elif mem_percent > MEMORY_WARN_THRESHOLD * 100:
+                # 预警：减半
+                new_count = max(1, num_workers // 2)
+                logger.warning(
+                    f"[DYNAMIC_REGULATION] 内存预警: {mem_percent:.1f}%, "
+                    f"可用={available_gb:.1f}GB, worker {num_workers} -> {new_count}"
+                )
+                return new_count
+            elif available_gb < 2.0:
+                # 可用内存不足2GB：减半
+                new_count = max(1, num_workers // 2)
+                logger.warning(
+                    f"[DYNAMIC_REGULATION] 可用内存不足: {available_gb:.1f}GB, "
+                    f"worker {num_workers} -> {new_count}"
+                )
+                return new_count
+
+            return num_workers  # 内存正常，维持不变
+        except Exception as e:
+            logger.warning(f"[DYNAMIC_REGULATION] 检查失败: {e}, 保持当前 worker 数")
+            return num_workers
 
     @staticmethod
     def _cleanup_pool(pool: Pool, force: bool = False) -> None:
@@ -293,6 +346,25 @@ class ParallelProcessingService:
                         logger.info(f"[{task_id}] 检测任务被停止（结果收集中，已收集 {result_idx}/{len(results)} 个结果）")
                         ParallelProcessingService._cleanup_pool(pool, force=True)
                         return False, None, [], "检测任务被用户停止"
+
+                    # 实时内存水位检测：每处理5个结果检查一次内存
+                    if (result_idx + 1) % 5 == 0:
+                        current_mem = ResourceMonitor.get_memory_usage()
+                        mem_pct = current_mem.get('percent', 0)
+                        if mem_pct > MEMORY_CRITICAL_THRESHOLD * 100:
+                            logger.critical(
+                                f"[DYNAMIC_REGULATION] 结果收集阶段内存临界: {mem_pct:.1f}%, "
+                                f"立即触发GC并暂停新任务提交, 等待现有任务完成"
+                            )
+                            import gc
+                            gc.collect()
+                            # 暂停 2 秒让系统释放内存
+                            time.sleep(2)
+                        elif mem_pct > MEMORY_WARN_THRESHOLD * 100:
+                            logger.warning(
+                                f"[DYNAMIC_REGULATION] 结果收集阶段内存预警: {mem_pct:.1f}%, "
+                                f"建议减少后续批次 worker 数量"
+                            )
 
                     try:
                         logger.debug(

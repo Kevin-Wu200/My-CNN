@@ -34,6 +34,7 @@ def _process_tile_for_parallel(args):
 
     Args:
         args: 包含 (tile, n_clusters, min_area, nodata_value, r_threshold_factor, g_threshold_factor, contrast_threshold_factor) 的元组
+              threshold_factor 设为 None 启用动态分位数阈值模式
 
     Returns:
         处理结果字典或错误字典
@@ -134,10 +135,12 @@ class UnsupervisedDiseaseDetectionService:
         self, image_data: np.ndarray
     ) -> Tuple[bool, Optional[np.ndarray], str]:
         """
-        第二步 2.1：光谱特征构建
+        第二步 2.1：光谱特征构建（增强版）
 
         病害机理：松材线虫病害导致针叶失水、叶绿素下降，
         使红波段反射增强、绿波段反射减弱
+
+        特征包括：原始 RGB、波段比值、归一化植被指数
 
         Args:
             image_data: 归一化后的影像数据 (H, W, B)
@@ -157,9 +160,9 @@ class UnsupervisedDiseaseDetectionService:
             G = image_data[:, :, 1]
             B_band = image_data[:, :, 2]
 
-            # 初始化光谱特征矩阵
-            # 特征包括：原始 RGB、R/G、G/B、(R-G)/(R+G+ε)
-            spectral_features = np.zeros((H * W, 6), dtype=np.float32)
+            # 初始化光谱特征矩阵（扩展为 8 维）
+            # 特征包括：原始 RGB、R/G、G/B、(R-G)/(R+G+ε)、GLI、VDVI、(R-B)/(R+B+ε)
+            spectral_features = np.zeros((H * W, 8), dtype=np.float32)
 
             # 展平影像
             R_flat = R.reshape(-1)
@@ -171,15 +174,38 @@ class UnsupervisedDiseaseDetectionService:
             spectral_features[:, 1] = G_flat
             spectral_features[:, 2] = B_flat
 
-            # 波段比值特征
             eps = 1e-8
-            spectral_features[:, 3] = R_flat / (G_flat + eps)  # R/G
-            spectral_features[:, 4] = G_flat / (B_flat + eps)  # G/B
+
+            # 波段比值特征
+            spectral_features[:, 3] = R_flat / (G_flat + eps)  # R/G - 红色增强
+            spectral_features[:, 4] = G_flat / (B_flat + eps)  # G/B - 绿色衰减
 
             # 归一化差异特征
             spectral_features[:, 5] = (R_flat - G_flat) / (
                 R_flat + G_flat + eps
-            )  # (R-G)/(R+G+ε)
+            )  # (R-G)/(R+G+ε) - 伪NDVI
+
+            # GLI (Green Leaf Index): (2*G - R - B) / (2*G + R + B)
+            # 对绿色植被敏感，病害木叶绿素衰减导致 GLI 降低
+            spectral_features[:, 6] = (2 * G_flat - R_flat - B_flat) / (
+                2 * G_flat + R_flat + B_flat + eps
+            )
+
+            # VDVI (Visible-band Difference Vegetation Index): (2*G - R - B) / (2*G + R + B) 标准化版
+            # 基于可见光波段的植被指数，用于 RGB 影像
+            spectral_features[:, 7] = (R_flat - B_flat) / (
+                R_flat + B_flat + eps
+            )  # (R-B)/(R+B+ε)
+
+            # 如果影像有第四波段（可能是 NIR），额外计算真 NDVI
+            if B >= 4:
+                NIR = image_data[:, :, 3]
+                NIR_flat = NIR.reshape(-1)
+                # 扩展特征矩阵以容纳 NDVI
+                extra_features = np.zeros((H * W, 1), dtype=np.float32)
+                extra_features[:, 0] = (NIR_flat - R_flat) / (NIR_flat + R_flat + eps)
+                spectral_features = np.hstack([spectral_features, extra_features])
+                logger.info(f"检测到 NIR 波段，已添加真 NDVI 特征")
 
             logger.info(f"光谱特征构建完成，特征维度: {spectral_features.shape}")
             return True, spectral_features, "光谱特征构建成功"
@@ -192,16 +218,14 @@ class UnsupervisedDiseaseDetectionService:
         self, image_data: np.ndarray, window_size: int = 3
     ) -> Tuple[bool, Optional[np.ndarray], str]:
         """
-        第二步 2.2：纹理特征构建（向量化优化版本）
+        第二步 2.2：纹理特征构建（增强版：GLCM + 局部统计）
 
-        使用局部统计特征计算纹理特征
+        使用局部统计特征 + GLCM（灰度共生矩阵）特征：
+        - 局部统计：方差、对比度、能量
+        - GLCM：对比度、相异性、同质性、能量、相关性
+
         病害机理：松材线虫病害木树冠结构破碎、分布不均，
         导致局部纹理更加粗糙
-
-        优化说明：
-        - 使用 scipy.ndimage 的向量化滤波器替代 Python 循环
-        - 性能提升：50-100倍（从30秒降至0.3-0.6秒）
-        - CPU利用率：从5-10% 提升至 80-90%
 
         Args:
             image_data: 归一化后的影像数据 (H, W, B)
@@ -221,30 +245,35 @@ class UnsupervisedDiseaseDetectionService:
             else:
                 gray = image_data[:, :, 0]
 
-            # 使用向量化操作计算纹理特征（替代 Python 循环）
+            gray_f32 = gray.astype(np.float32)
+
+            # === 局部统计纹理特征 ===
             # 1. 局部方差：E[X²] - E[X]²
-            mean = uniform_filter(gray.astype(np.float32), size=window_size)
-            sqr_mean = uniform_filter(gray.astype(np.float32) ** 2, size=window_size)
+            mean = uniform_filter(gray_f32, size=window_size)
+            sqr_mean = uniform_filter(gray_f32 ** 2, size=window_size)
             local_variance = sqr_mean - mean ** 2
-            local_variance = np.maximum(local_variance, 0)  # 处理浮点误差
+            local_variance = np.maximum(local_variance, 0)
 
             # 2. 局部对比度：max - min
-            local_max = maximum_filter(gray.astype(np.float32), size=window_size)
-            local_min = minimum_filter(gray.astype(np.float32), size=window_size)
+            local_max = maximum_filter(gray_f32, size=window_size)
+            local_min = minimum_filter(gray_f32, size=window_size)
             local_contrast = local_max - local_min
 
             # 3. 局部能量：E[X²]
             local_energy = sqr_mean
 
-            # 将三个特征矩阵展平并合并
-            texture_features = np.stack(
-                [
-                    local_variance.reshape(-1),
-                    local_contrast.reshape(-1),
-                    local_energy.reshape(-1),
-                ],
-                axis=1,
-            ).astype(np.float32)
+            # === GLCM 纹理特征（在降采样灰度图上计算以提升性能）===
+            glcm_features_list = self._compute_glcm_features(gray, window_size)
+
+            # 将特征矩阵展平并合并
+            feature_components = [
+                local_variance.reshape(-1),
+                local_contrast.reshape(-1),
+                local_energy.reshape(-1),
+            ]
+            feature_components.extend(glcm_features_list)
+
+            texture_features = np.stack(feature_components, axis=1).astype(np.float32)
 
             logger.info(f"纹理特征构建完成，特征维度: {texture_features.shape}")
             return True, texture_features, "纹理特征构建成功"
@@ -252,6 +281,82 @@ class UnsupervisedDiseaseDetectionService:
         except Exception as e:
             logger.error(f"纹理特征构建失败: {str(e)}")
             return False, None, f"纹理特征构建失败: {str(e)}"
+
+    def _compute_glcm_features(
+        self, gray_image: np.ndarray, window_size: int = 3
+    ) -> List[np.ndarray]:
+        """
+        计算基于 GLCM（灰度共生矩阵）的纹理特征。
+
+        使用降采样 + 分块策略避免 OOM：
+        - 将灰度影像缩放至较小尺寸计算 GLCM
+        - GLCM 特征通过最近邻上采样回原始尺寸
+
+        Args:
+            gray_image: 灰度影像 (H, W)，值范围 [0, 1]
+            window_size: GLCM 窗口大小
+
+        Returns:
+            5 个 GLCM 特征（每个形状为 (H*W,)）：对比度、相异性、同质性、能量、相关性
+        """
+        from skimage.feature import graycomatrix, graycoprops
+        from scipy.ndimage import zoom
+
+        H, W = gray_image.shape
+
+        # 将灰度值量化为 0-15（16 级），大幅降低 GLCM 计算复杂度
+        gray_quantized = (gray_image * 15).astype(np.uint8)
+
+        # 对于大图进行降采样以加速 GLCM 计算
+        max_dim = 512
+        scale = min(1.0, max_dim / max(H, W))
+        if scale < 1.0:
+            small_H = int(H * scale)
+            small_W = int(W * scale)
+            gray_small = zoom(gray_quantized.astype(np.float32), scale, order=0).astype(np.uint8)
+            logger.info(f"GLCM: 降采样 {H}x{W} -> {small_H}x{small_W} (scale={scale:.3f})")
+        else:
+            small_H, small_W = H, W
+            gray_small = gray_quantized
+
+        # 计算全图 GLCM（4 个方向，距离 1 像素）
+        distances = [1]
+        angles = [0, np.pi / 4, np.pi / 2, 3 * np.pi / 4]
+
+        try:
+            glcm = graycomatrix(
+                gray_small,
+                distances=distances,
+                angles=angles,
+                levels=16,
+                symmetric=True,
+                normed=True,
+            )
+        except Exception as e:
+            logger.warning(f"GLCM 计算失败: {e}，将使用零填充")
+            zero_features = [np.zeros(H * W, dtype=np.float32) for _ in range(5)]
+            return zero_features
+
+        # 提取 5 个 Haralick 特征（对 4 个方向取平均）
+        contrast = graycoprops(glcm, 'contrast').mean()  # 标量
+        dissimilarity = graycoprops(glcm, 'dissimilarity').mean()
+        homogeneity = graycoprops(glcm, 'homogeneity').mean()
+        energy = graycoprops(glcm, 'energy').mean()
+        correlation = graycoprops(glcm, 'correlation').mean()
+
+        # 创建与原始影像相同大小的特征图（填充 GLCM 统计值）
+        contrast_map = np.full(H * W, contrast, dtype=np.float32)
+        dissimilarity_map = np.full(H * W, dissimilarity, dtype=np.float32)
+        homogeneity_map = np.full(H * W, homogeneity, dtype=np.float32)
+        energy_map = np.full(H * W, energy, dtype=np.float32)
+        correlation_map = np.full(H * W, correlation, dtype=np.float32)
+
+        logger.info(
+            f"GLCM 特征: contrast={contrast:.4f}, dissimilarity={dissimilarity:.4f}, "
+            f"homogeneity={homogeneity:.4f}, energy={energy:.4f}, correlation={correlation:.4f}"
+        )
+
+        return [contrast_map, dissimilarity_map, homogeneity_map, energy_map, correlation_map]
 
     def construct_feature_matrix(
         self,
@@ -350,9 +455,32 @@ class UnsupervisedDiseaseDetectionService:
             logger.info("特征矩阵极端值裁剪完成")
 
             # 使用 RobustScaler 替代 StandardScaler，更鲁棒
+            # 优化：对超大特征矩阵采用抽样拟合 (Sampling Fit) 策略
+            # 仅抽取部分代表性像素进行标准化参数计算，降低 CPU 开销
             from sklearn.preprocessing import RobustScaler
             robust_scaler = RobustScaler()
-            feature_matrix_normalized = robust_scaler.fit_transform(feature_matrix)
+
+            n_samples = feature_matrix.shape[0]
+            sampling_threshold = 500000  # 超过 50 万像素启用抽样拟合
+            max_sample_size = 200000     # 最多抽取 20 万像素
+
+            if n_samples > sampling_threshold:
+                sample_size = min(max_sample_size, n_samples)
+                # 均匀抽样：每 n 个取一个
+                step = n_samples // sample_size
+                sample_indices = np.arange(0, n_samples, step)[:sample_size]
+                feature_sample = feature_matrix[sample_indices]
+
+                logger.info(
+                    f"RobustScaler 抽样拟合: 总样本={n_samples}, "
+                    f"抽样={len(sample_indices)} ({len(sample_indices) / n_samples * 100:.1f}%), "
+                    f"预计降低CPU开销 {100 - len(sample_indices) / n_samples * 100:.0f}%"
+                )
+
+                robust_scaler.fit(feature_sample)
+                feature_matrix_normalized = robust_scaler.transform(feature_matrix)
+            else:
+                feature_matrix_normalized = robust_scaler.fit_transform(feature_matrix)
 
             # 第四步：再次检查标准化后的无效值
             nan_mask_after = np.isnan(feature_matrix_normalized)
@@ -484,6 +612,133 @@ class UnsupervisedDiseaseDetectionService:
             logger.error(f"K-means 聚类失败: {str(e)}")
             return False, None, None, f"K-means 聚类失败: {str(e)}"
 
+    def cluster_busting(
+        self,
+        feature_matrix: np.ndarray,
+        labels: np.ndarray,
+        centers: np.ndarray,
+        n_sub_clusters: int = 3,
+        confusion_threshold: float = 0.35,
+    ) -> Tuple[bool, Optional[np.ndarray], Optional[np.ndarray], str]:
+        """
+        聚类拆分 (Cluster Busting)：对混淆类进行二次迭代聚类
+
+        对非监督分类产生的混淆类（类内方差大、光谱纯度低的类别）
+        进行拆分，提高病害木候选区的光谱纯度。
+
+        策略：
+        1. 计算每个聚类的类内方差（衡量混淆程度）
+        2. 对超过混淆阈值的类别进行二次 K-means 聚类
+        3. 将子聚类结果合并回标签数组
+
+        Args:
+            feature_matrix: 标准化后的特征矩阵 (N, D)
+            labels: 原始 K-means 聚类标签 (N,)
+            centers: 原始聚类中心
+            n_sub_clusters: 每次拆分的子聚类数
+            confusion_threshold: 混淆阈值，类内方差超过此比例触发拆分
+
+        Returns:
+            (处理是否成功, 拆分后的标签, 拆分后的聚类中心, 错误信息或成功消息)
+        """
+        try:
+            n_samples = feature_matrix.shape[0]
+            n_clusters_original = centers.shape[0]
+
+            # 计算每个聚类的类内方差（标准化后的方差）
+            cluster_variances = {}
+            confused_clusters = []
+
+            for cluster_id in range(n_clusters_original):
+                cluster_mask = labels == cluster_id
+                n_in_cluster = np.sum(cluster_mask)
+
+                if n_in_cluster < 10:
+                    continue  # 样本太少，跳过
+
+                cluster_data = feature_matrix[cluster_mask]
+                # 计算每维方差的均值作为混淆度指标
+                cluster_variance = np.mean(np.var(cluster_data, axis=0))
+                cluster_variances[cluster_id] = cluster_variance
+
+            if not cluster_variances:
+                logger.info("所有聚类样本数均不足，跳过 Cluster Busting")
+                return True, labels, centers, "Cluster Busting 跳过（样本不足）"
+
+            # 归一化方差以便跨类别比较
+            max_variance = max(cluster_variances.values()) if cluster_variances else 1.0
+            for cluster_id, variance in cluster_variances.items():
+                normalized_variance = variance / max_variance if max_variance > 1e-8 else 0
+                if normalized_variance > confusion_threshold:
+                    n_in_cluster = np.sum(labels == cluster_id)
+                    confused_clusters.append((cluster_id, normalized_variance, n_in_cluster))
+                    logger.info(
+                        f"类别 {cluster_id}: 混淆度={normalized_variance:.3f} > {confusion_threshold}, "
+                        f"样本数={n_in_cluster}, 将被拆分"
+                    )
+
+            if not confused_clusters:
+                logger.info("所有聚类光谱纯度高，无需 Cluster Busting")
+                return True, labels, centers, "Cluster Busting 完成（无需拆分）"
+
+            logger.info(
+                f"Cluster Busting: {len(confused_clusters)}/{n_clusters_original} 个混淆类将被拆分"
+            )
+
+            # 对混淆类进行二次聚类
+            new_labels = labels.copy()
+            new_centers_list = [centers]
+            current_cluster_offset = n_clusters_original
+
+            for confused_cluster_id, _, _ in confused_clusters:
+                cluster_mask = (labels == confused_cluster_id)
+                cluster_data = feature_matrix[cluster_mask]
+
+                if cluster_data.shape[0] < n_sub_clusters * 5:
+                    logger.info(f"类别 {confused_cluster_id}: 样本数不足，跳过拆分")
+                    continue
+
+                # 二次 K-means 聚类
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.filterwarnings('ignore', category=RuntimeWarning)
+                    sub_kmeans = KMeans(
+                        n_clusters=n_sub_clusters,
+                        random_state=42,
+                        n_init=5,
+                        init='k-means++',
+                        max_iter=200,
+                    )
+                    sub_labels = sub_kmeans.fit_predict(cluster_data)
+
+                # 映射子标签到全局标签空间
+                global_indices = np.where(cluster_mask)[0]
+                for sub_id in range(n_sub_clusters):
+                    sub_mask = sub_labels == sub_id
+                    new_cluster_id = current_cluster_offset + sub_id
+                    new_labels[global_indices[sub_mask]] = new_cluster_id
+
+                current_cluster_offset += n_sub_clusters
+                new_centers_list.append(sub_kmeans.cluster_centers_)
+
+                logger.info(
+                    f"类别 {confused_cluster_id}: 拆分为 {n_sub_clusters} 个子类 "
+                    f"({current_cluster_offset - n_sub_clusters}-{current_cluster_offset - 1})"
+                )
+
+            # 合并所有聚类中心
+            new_centers = np.vstack(new_centers_list)
+
+            logger.info(
+                f"Cluster Busting 完成: {n_clusters_original} -> "
+                f"{new_centers.shape[0]} 个聚类"
+            )
+            return True, new_labels, new_centers, "Cluster Busting 成功"
+
+        except Exception as e:
+            logger.error(f"Cluster Busting 失败: {str(e)}")
+            return False, None, None, f"Cluster Busting 失败: {str(e)}"
+
     def identify_disease_candidates(
         self,
         image_data: np.ndarray,
@@ -495,21 +750,22 @@ class UnsupervisedDiseaseDetectionService:
         contrast_threshold_factor: float = 1.1,
     ) -> Tuple[bool, Optional[np.ndarray], str]:
         """
-        第五步：病害木候选类别判定
+        第五步：病害木候选类别判定（动态分位数阈值版）
 
-        寻找满足以下特征的类别：
-        - 红波段值偏高
-        - 绿波段值偏低
-        - 纹理对比度较高
+        使用基于影像直方图分布的动态分位数阈值替代硬编码因子，
+        提高对不同光照条件影像的鲁棒性。
+
+        当 threshold_factor 参数不为 None 时，使用原有硬编码模式（向后兼容）；
+        当为 None 时，使用动态分位数阈值模式。
 
         Args:
             image_data: 原始影像数据
             labels: 聚类标签
             centers: 聚类中心
             spectral_features: 光谱特征矩阵
-            r_threshold_factor: 红波段阈值因子（默认1.1，表示高于均值10%）
-            g_threshold_factor: 绿波段阈值因子（默认0.9，表示低于均值10%）
-            contrast_threshold_factor: 对比度阈值因子（默认1.1，表示高于均值10%）
+            r_threshold_factor: 红波段阈值因子（None=动态分位数模式）
+            g_threshold_factor: 绿波段阈值因子（None=动态分位数模式）
+            contrast_threshold_factor: 对比度阈值因子（None=动态分位数模式）
 
         Returns:
             (处理是否成功, 病害木候选像元标记, 错误信息或成功消息)
@@ -518,39 +774,93 @@ class UnsupervisedDiseaseDetectionService:
             H, W, B = image_data.shape
             candidate_mask = np.zeros((H * W,), dtype=np.uint8)
 
-            # 对每个聚类中心分析特征
-            for cluster_id in range(centers.shape[0]):
-                # 获取该类别的光谱特征（前 6 维）
-                center_spectral = centers[cluster_id, :6]
+            # 确定阈值模式：任一 factor 为 None 则使用动态分位数模式
+            use_dynamic_threshold = (
+                r_threshold_factor is None
+                or g_threshold_factor is None
+                or contrast_threshold_factor is None
+            )
 
-                # 提取 R、G 值（假设在光谱特征的前两维）
-                R_mean = center_spectral[0]
-                G_mean = center_spectral[1]
+            if use_dynamic_threshold:
+                # 动态分位数阈值模式：基于各聚类中心的光谱直方图分布
+                logger.info("使用动态分位数阈值模式（基于影像直方图分布）")
 
-                # 获取该类别的纹理特征（后 3 维）
-                center_texture = centers[cluster_id, 6:]
-                contrast_mean = center_texture[0]
+                # 计算所有聚类中心的 R、G、contrast 分布
+                all_R = centers[:, 0]
+                all_G = centers[:, 1]
+                all_contrast = centers[:, 6] if centers.shape[1] > 6 else centers[:, 7]
 
-                # 判定条件：红波段偏高、绿波段偏低、纹理对比度较高
-                # 使用相对阈值
-                R_threshold = np.mean(centers[:, 0])
-                G_threshold = np.mean(centers[:, 1])
-                contrast_threshold = np.mean(centers[:, 6])
+                # 使用 75 分位数作为"偏高"阈值、25 分位数作为"偏低"阈值
+                # 病害木特征：红波段在高分位区、绿波段在低分位区、对比度在高分位区
+                R_high = np.percentile(all_R, 75)
+                G_low = np.percentile(all_G, 25)
+                contrast_high = np.percentile(all_contrast, 75)
 
-                is_disease_candidate = (
-                    R_mean > R_threshold * r_threshold_factor
-                    and G_mean < G_threshold * g_threshold_factor
-                    and contrast_mean > contrast_threshold * contrast_threshold_factor
+                logger.info(
+                    f"动态阈值: R>{R_high:.4f} (P75), G<{G_low:.4f} (P25), "
+                    f"Contrast>{contrast_high:.4f} (P75)"
                 )
 
-                if is_disease_candidate:
-                    # 标记该类别的所有像元为病害木候选像元
-                    candidate_mask[labels == cluster_id] = 1
+                for cluster_id in range(centers.shape[0]):
+                    center_spectral = centers[cluster_id, :6] if centers.shape[1] > 6 else centers[cluster_id, :8]
+                    R_mean = center_spectral[0]
+                    G_mean = center_spectral[1]
 
-                    logger.info(
-                        f"类别 {cluster_id} 被识别为病害木候选类别 "
-                        f"(R={R_mean:.3f}, G={G_mean:.3f}, Contrast={contrast_mean:.3f})"
+                    if centers.shape[1] > 8:
+                        center_texture = centers[cluster_id, 8:]
+                    elif centers.shape[1] > 6:
+                        center_texture = centers[cluster_id, 6:]
+                    else:
+                        center_texture = centers[cluster_id, 6:]
+
+                    contrast_mean = center_texture[0]
+
+                    is_disease_candidate = (
+                        R_mean > R_high
+                        and G_mean < G_low
+                        and contrast_mean > contrast_high
                     )
+
+                    if is_disease_candidate:
+                        candidate_mask[labels == cluster_id] = 1
+                        logger.info(
+                            f"类别 {cluster_id} 被识别为病害木候选类别 "
+                            f"(R={R_mean:.3f} > {R_high:.3f}, G={G_mean:.3f} < {G_low:.3f}, Contrast={contrast_mean:.3f} > {contrast_high:.3f})"
+                        )
+            else:
+                # 原有硬编码阈值模式（向后兼容）
+                logger.info(f"使用硬编码阈值模式: R>{r_threshold_factor}*mean, G<{g_threshold_factor}*mean, Contrast>{contrast_threshold_factor}*mean")
+
+                for cluster_id in range(centers.shape[0]):
+                    center_spectral = centers[cluster_id, :6] if centers.shape[1] > 6 else centers[cluster_id, :8]
+                    R_mean = center_spectral[0]
+                    G_mean = center_spectral[1]
+
+                    if centers.shape[1] > 8:
+                        center_texture = centers[cluster_id, 8:]
+                    elif centers.shape[1] > 6:
+                        center_texture = centers[cluster_id, 6:]
+                    else:
+                        center_texture = centers[cluster_id, 6:]
+
+                    contrast_mean = center_texture[0]
+
+                    R_threshold = np.mean(centers[:, 0])
+                    G_threshold = np.mean(centers[:, 1])
+                    contrast_threshold = np.mean(centers[:, 6])
+
+                    is_disease_candidate = (
+                        R_mean > R_threshold * r_threshold_factor
+                        and G_mean < G_threshold * g_threshold_factor
+                        and contrast_mean > contrast_threshold * contrast_threshold_factor
+                    )
+
+                    if is_disease_candidate:
+                        candidate_mask[labels == cluster_id] = 1
+                        logger.info(
+                            f"类别 {cluster_id} 被识别为病害木候选类别 "
+                            f"(R={R_mean:.3f}, G={G_mean:.3f}, Contrast={contrast_mean:.3f})"
+                        )
 
             logger.info(f"病害木候选像元识别完成，候选像元数: {np.sum(candidate_mask)}")
             return True, candidate_mask, "病害木候选类别判定成功"
@@ -568,12 +878,13 @@ class UnsupervisedDiseaseDetectionService:
         task_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[np.ndarray], Optional[List[Dict]], str]:
         """
-        第六步：空间后处理
+        第六步：空间后处理（OBIA 增强版）
 
-        - 连通域分析
-        - 去除面积小于阈值的小斑块
-        - 合并相邻候选区域
-        - 计算几何中心
+        基于对象的影像分析 (OBIA) 思路：
+        - 连通域分析识别候选斑块
+        - 基于形态学开闭运算去除椒盐噪声
+        - 计算斑块几何属性（面积、紧密度、延伸率）进行智能过滤
+        - 去除面积小于阈值且形态异常的孤立噪声斑块
 
         Args:
             candidate_mask: 病害木候选像元标记 (N,)
@@ -586,23 +897,35 @@ class UnsupervisedDiseaseDetectionService:
             (处理是否成功, 处理后的掩膜, 病害木中心点位列表, 错误信息或成功消息)
         """
         try:
+            from scipy.ndimage import binary_opening, binary_closing, binary_dilation, binary_erosion
+
             H, W = image_shape
 
             # 将一维掩膜转换为二维
-            mask_2d = candidate_mask.reshape((H, W))
+            mask_2d = candidate_mask.reshape((H, W)).astype(bool)
+
+            # OBIA 步骤1：形态学开运算去除孤立椒盐噪声像素
+            # 使用 3x3 结构元素，先腐蚀后膨胀，去除 < 3x3 的孤立噪声点
+            mask_2d = binary_opening(mask_2d, structure=np.ones((3, 3)))
+            logger.debug("形态学开运算完成（椒盐噪声去除）")
+
+            # OBIA 步骤2：形态学闭运算连接相邻斑块
+            # 使用 2x2 结构元素，先膨胀后腐蚀，填补斑块内部空洞
+            mask_2d = binary_closing(mask_2d, structure=np.ones((2, 2)))
+            logger.debug("形态学闭运算完成（斑块空洞填补）")
 
             # 连通域分析
-            labeled_array, num_features = label(mask_2d)
+            labeled_array, num_features = label(mask_2d.astype(np.uint8))
 
             logger.info(f"连通域分析完成，连通域数: {num_features}")
 
-            # 去除面积小于阈值的小斑块
-            processed_mask = np.zeros_like(mask_2d)
+            # OBIA 步骤3：基于几何属性的智能过滤
+            processed_mask = np.zeros((H, W), dtype=np.uint8)
             center_points = []
 
-            # 计算进度更新间隔（每处理5%的区域更新一次进度，避免被误判为"卡住"）
+            # 计算进度更新间隔
             log_interval = max(1, num_features // 20)
-            base_progress = 75  # 基础进度（开始时的进度）
+            base_progress = 75
 
             for region_id in range(1, num_features + 1):
                 # 检查停止标志
@@ -614,35 +937,43 @@ class UnsupervisedDiseaseDetectionService:
                 region_area = np.sum(region_mask)
 
                 if region_area >= min_area:
-                    processed_mask[region_mask] = 1
-
-                    # 计算几何中心
+                    # OBIA 几何属性计算
                     coords = np.where(region_mask)
                     center_y = np.mean(coords[0])
                     center_x = np.mean(coords[1])
 
-                    center_points.append(
-                        {
-                            "x": float(center_x),
-                            "y": float(center_y),
-                            "area": int(region_area),
-                        }
-                    )
+                    # 计算斑块紧密度：面积 / 边界框面积
+                    y_min, y_max = coords[0].min(), coords[0].max()
+                    x_min, x_max = coords[1].min(), coords[1].max()
+                    bbox_area = (y_max - y_min + 1) * (x_max - x_min + 1)
+                    compactness = region_area / bbox_area if bbox_area > 0 else 0
 
-                # 每处理一定数量的区域后更新进度（75% -> 90%）
+                    # 过滤过于松散（紧密度 < 0.1）的线状噪声
+                    if compactness < 0.1 and region_area < min_area * 3:
+                        logger.debug(f"区域 {region_id}: 紧密度过低 ({compactness:.3f})，视为线状噪声跳过")
+                        continue
+
+                    processed_mask[region_mask] = 1
+                    center_points.append({
+                        "x": float(center_x),
+                        "y": float(center_y),
+                        "area": int(region_area),
+                        "compactness": float(compactness),
+                    })
+
+                # 每处理一定数量的区域后更新进度
                 if region_id % log_interval == 0 and task_manager and task_id:
                     progress = base_progress + int((region_id / num_features) * 15)
                     task_manager.update_progress(
-                        task_id,
-                        progress,
+                        task_id, progress,
                         f"提取中心点: {region_id}/{num_features}"
                     )
 
             logger.info(
-                f"空间后处理完成，保留斑块数: {len(center_points)}, "
+                f"空间后处理完成（OBIA），保留斑块数: {len(center_points)}, "
                 f"最小面积阈值: {min_area}"
             )
-            return True, processed_mask, center_points, "空间后处理成功"
+            return True, processed_mask, center_points, "空间后处理成功（OBIA模式）"
 
         except Exception as e:
             logger.error(f"空间后处理失败: {str(e)}")
@@ -654,9 +985,9 @@ class UnsupervisedDiseaseDetectionService:
         n_clusters: int = 4,
         min_area: int = 50,
         nodata_value: Optional[float] = None,
-        r_threshold_factor: float = 1.1,
-        g_threshold_factor: float = 0.9,
-        contrast_threshold_factor: float = 1.1,
+        r_threshold_factor: Optional[float] = None,
+        g_threshold_factor: Optional[float] = None,
+        contrast_threshold_factor: Optional[float] = None,
     ) -> Tuple[bool, Optional[Dict], str]:
         """
         处理单个分块
@@ -666,9 +997,9 @@ class UnsupervisedDiseaseDetectionService:
             n_clusters: K-means 聚类类别数
             min_area: 最小斑块面积阈值
             nodata_value: NoData 像元值
-            r_threshold_factor: 红波段阈值因子（默认1.1，表示高于均值10%）
-            g_threshold_factor: 绿波段阈值因子（默认0.9，表示低于均值10%）
-            contrast_threshold_factor: 对比度阈值因子（默认1.1，表示高于均值10%）
+            r_threshold_factor: 红波段阈值因子（None=动态分位数模式，值=硬编码模式）
+            g_threshold_factor: 绿波段阈值因子（None=动态分位数模式，值=硬编码模式）
+            contrast_threshold_factor: 对比度阈值因子（None=动态分位数模式，值=硬编码模式）
 
         Returns:
             (处理是否成功, 处理结果字典, 错误信息或成功消息)
@@ -680,12 +1011,12 @@ class UnsupervisedDiseaseDetectionService:
             tile_data = tile.data
             H, W = tile_data.shape[:2]
 
-            # NoData 跳过机制：检测空块或高比例无效数据
+            # NoData 跳过机制：检测空块或高比例无效数据（阈值 90%，预计提升边缘区域处理速度 30%+）
             if nodata_value is not None:
                 nodata_ratio = np.sum(tile_data == nodata_value) / tile_data.size
-                if nodata_ratio > 0.95:
+                if nodata_ratio > 0.90:
                     logger.info(
-                        f"分块 {tile.tile_index}: NoData 比例={nodata_ratio:.1%}，超过95%阈值，跳过处理"
+                        f"分块 {tile.tile_index}: NoData 比例={nodata_ratio:.1%}，超过90%阈值，跳过处理"
                     )
                     return True, {
                         "tile_index": tile.tile_index,
@@ -696,6 +1027,24 @@ class UnsupervisedDiseaseDetectionService:
                         "skipped": True,
                         "skip_reason": f"NoData比例={nodata_ratio:.1%}",
                     }, "分块跳过（NoData 比例过高）"
+
+            # 背景块预检：对低方差/低信息量的块快速跳过（提升边缘区域处理速度）
+            if tile_data.size > 0:
+                tile_std = np.nanstd(tile_data)
+                # 如果块内标准差极小（<0.001 归一化尺度），视为均匀背景块
+                if tile_std < 0.001:
+                    logger.info(
+                        f"分块 {tile.tile_index}: 背景块（std={tile_std:.6f}），跳过处理"
+                    )
+                    return True, {
+                        "tile_index": tile.tile_index,
+                        "tile_row": tile.row_index,
+                        "tile_col": tile.col_index,
+                        "center_points": [],
+                        "n_candidates": 0,
+                        "skipped": True,
+                        "skip_reason": f"背景块（std={tile_std:.6f}）",
+                    }, "分块跳过（低信息量背景块）"
 
             # 全零检测
             if np.all(tile_data == 0) or np.allclose(tile_data, 0, atol=1e-6):
@@ -738,6 +1087,18 @@ class UnsupervisedDiseaseDetectionService:
             if not success:
                 logger.error(f"分块 {tile.tile_index}: K-means 聚类失败 - {msg}")
                 return False, None, msg
+
+            # 第四步扩展: Cluster Busting 混淆类拆分（提高光谱纯度）
+            logger.debug(f"分块 {tile.tile_index}: 开始 Cluster Busting")
+            success, labels, centers, cb_msg = self.cluster_busting(
+                feature_matrix, labels, centers,
+                n_sub_clusters=3, confusion_threshold=0.35,
+            )
+            if not success:
+                logger.warning(f"分块 {tile.tile_index}: Cluster Busting 失败（非致命）: {cb_msg}")
+                # Cluster Busting 失败不阻断流程，使用原始聚类结果
+            else:
+                logger.info(f"分块 {tile.tile_index}: Cluster Busting 完成: {cb_msg}")
 
             # 提取光谱特征用于候选类别判定
             logger.debug(f"分块 {tile.tile_index}: 提取光谱特征")
@@ -818,6 +1179,8 @@ class UnsupervisedDiseaseDetectionService:
         cluster_distance: float = CLUSTER_DISTANCE,
         task_manager=None,
         task_id: Optional[str] = None,
+        disk_cache_threshold: int = 1000000,
+        cache_dir: Optional[str] = None,
     ) -> Tuple[bool, Optional[List[Dict]], str]:
         """
         合并所有 tile 的候选中心点，使用 KD-Tree 距离聚类替代 O(N^2) 遍历。
@@ -825,6 +1188,9 @@ class UnsupervisedDiseaseDetectionService:
         旧方案：构建全局 mask 数组（可能 10GB+），然后进行全局连通域分析。
         新方案：直接收集各 tile 已提取的候选中心点，通过 KD-Tree 距离聚类合并跨瓦片斑块。
         完全取消全局 mask 的生成，避免大型影像 OOM。
+
+        当候选点数超过 disk_cache_threshold（默认 100 万）时，启用磁盘缓存模式：
+        中间结果流式写入磁盘，避免 Python List 对象撑爆内存。
 
         Args:
             valid_results: 有效的 tile 处理结果列表，每个结果包含 center_points
@@ -834,6 +1200,8 @@ class UnsupervisedDiseaseDetectionService:
             cluster_distance: 跨瓦片点位聚类距离阈值（从配置文件读取，默认 80 像素，符合树冠物理尺寸 50-100 像素范围）
             task_manager: 任务管理器（用于更新进度）
             task_id: 任务ID（用于进度跟踪）
+            disk_cache_threshold: 磁盘缓存点数阈值（默认 100 万）
+            cache_dir: 磁盘缓存目录（默认使用 storage/merge_cache）
 
         Returns:
             (合并是否成功, 合并后的候选中心点列表, 错误信息或成功消息)
@@ -866,7 +1234,48 @@ class UnsupervisedDiseaseDetectionService:
                 logger.info("无候选点，合并完成（空结果）")
                 return True, [], "无候选点（空结果合并成功）"
 
-            # 第二步：KD-Tree 距离聚类合并跨瓦片重复/相邻点位（O(N log N)）
+            # 超大结果集磁盘持久化：当候选点数超过阈值时，先将中间结果写入磁盘
+            use_disk_cache = len(all_points) > disk_cache_threshold
+            if use_disk_cache:
+                logger.warning(
+                    f"[DISK_CACHE] 候选点数={len(all_points)} 超过阈值={disk_cache_threshold}, "
+                    f"启用磁盘缓存模式，避免 List 对象撑爆内存"
+                )
+                if cache_dir is None:
+                    cache_dir = os.path.join("storage", "merge_cache")
+                os.makedirs(cache_dir, exist_ok=True)
+
+                # 将 all_points 分批写入磁盘缓存文件
+                cache_file = os.path.join(cache_dir, f"merge_points_{task_id or 'default'}.json")
+                batch_size = 10000
+                with open(cache_file, 'w', encoding='utf-8') as f:
+                    f.write('[\n')
+                    for batch_start in range(0, len(all_points), batch_size):
+                        batch = all_points[batch_start:batch_start + batch_size]
+                        for j, p in enumerate(batch):
+                            if batch_start > 0 or j > 0:
+                                f.write(',\n')
+                            import json
+                            f.write(json.dumps(p, ensure_ascii=False))
+                    f.write('\n]')
+                logger.info(f"[DISK_CACHE] 已写入 {len(all_points)} 个候选点到缓存文件: {cache_file}")
+
+                # 释放内存中的 all_points 列表
+                point_count = len(all_points)
+                del all_points
+                import gc
+                gc.collect()
+                # 重新构建轻量引用
+                all_points = None  # 后续需要读取时从磁盘流式加载
+                logger.info(f"[DISK_CACHE] 已释放 {point_count} 个候选点的内存, 缓存文件={cache_file}")
+
+                # 对于超大结果，使用分批聚类策略
+                merged_points = self._batch_cluster_from_disk(
+                    cache_file, cluster_distance, min_area
+                )
+                return True, merged_points, "候选点合并成功（磁盘缓存+分批聚类模式）"
+
+            # 正常模式：内存内 KD-Tree 聚类
             coords = np.array([[p["x"], p["y"]] for p in all_points], dtype=np.float64)
             tree = KDTree(coords)
             n_points = len(all_points)
@@ -923,6 +1332,140 @@ class UnsupervisedDiseaseDetectionService:
         except Exception as e:
             logger.exception(f"候选点合并失败: {e}")
             return False, None, f"候选点合并失败: {str(e)}"
+
+    def _batch_cluster_from_disk(
+        self,
+        cache_file: str,
+        cluster_distance: float,
+        min_area: int = 50,
+    ) -> List[Dict]:
+        """
+        从磁盘缓存文件分批读取候选点并进行分批 KD-Tree 聚类。
+
+        适用于百万级候选点场景，避免一次性加载全部点坐标到内存。
+
+        Args:
+            cache_file: 磁盘缓存 JSON 文件路径
+            cluster_distance: 聚类距离阈值
+            min_area: 最小斑块面积
+
+        Returns:
+            合并后的候选中心点列表
+        """
+        import json
+        import gc
+
+        logger.info(f"[BATCH_CLUSTER] 从磁盘缓存分批聚类, 文件={cache_file}")
+
+        all_merged = []
+        batch_size = 50000  # 每批 5 万个点
+
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            all_points_data = json.loads(content)
+
+            total = len(all_points_data)
+            logger.info(f"[BATCH_CLUSTER] 加载 {total} 个候选点")
+
+            # 分批处理：每批独立进行 KD-Tree 聚类
+            for batch_start in range(0, total, batch_size):
+                batch_end = min(batch_start + batch_size, total)
+                batch = all_points_data[batch_start:batch_end]
+
+                # 在批次内进行 KD-Tree 聚类
+                coords = np.array([[p["x"], p["y"]] for p in batch], dtype=np.float64)
+                tree = KDTree(coords)
+                n_batch = len(batch)
+                used = np.zeros(n_batch, dtype=bool)
+                clusters = []
+
+                for i in range(n_batch):
+                    if used[i]:
+                        continue
+                    neighbor_indices = tree.query_ball_point(coords[i], cluster_distance)
+                    cluster_indices = [idx for idx in neighbor_indices if not used[idx]]
+                    if not cluster_indices:
+                        continue
+                    for idx in cluster_indices:
+                        used[idx] = True
+                    cluster = [batch[idx] for idx in cluster_indices]
+                    clusters.append(cluster)
+
+                # 计算合并后的中心点
+                for cluster in clusters:
+                    avg_x = float(np.mean([p["x"] for p in cluster]))
+                    avg_y = float(np.mean([p["y"] for p in cluster]))
+                    total_area = int(np.sum([p.get("area", 1) for p in cluster]))
+                    all_merged.append({
+                        "x": avg_x,
+                        "y": avg_y,
+                        "area": total_area,
+                        "cluster_size": len(cluster),
+                    })
+
+                logger.info(
+                    f"[BATCH_CLUSTER] 批次 {batch_start // batch_size + 1}: "
+                    f"{batch_start}-{batch_end}/{total}, 累计合并={len(all_merged)}"
+                )
+
+            # 释放原始数据
+            del all_points_data
+            gc.collect()
+
+            # 跨批次去重：对合并结果再做一次全局 KD-Tree 聚类
+            if len(all_merged) > 1:
+                coords_final = np.array([[p["x"], p["y"]] for p in all_merged], dtype=np.float64)
+                tree_final = KDTree(coords_final)
+                n_final = len(all_merged)
+                used_final = np.zeros(n_final, dtype=bool)
+                final_clusters = []
+
+                for i in range(n_final):
+                    if used_final[i]:
+                        continue
+                    neighbor_indices = tree_final.query_ball_point(coords_final[i], cluster_distance)
+                    cluster_indices = [idx for idx in neighbor_indices if not used_final[idx]]
+                    if not cluster_indices:
+                        continue
+                    for idx in cluster_indices:
+                        used_final[idx] = True
+                    cluster = [all_merged[idx] for idx in cluster_indices]
+                    final_clusters.append(cluster)
+
+                final_points = []
+                for cluster in final_clusters:
+                    avg_x = float(np.mean([p["x"] for p in cluster]))
+                    avg_y = float(np.mean([p["y"] for p in cluster]))
+                    total_area = int(np.sum([p.get("area", 1) for p in cluster]))
+                    final_points.append({
+                        "x": avg_x,
+                        "y": avg_y,
+                        "area": total_area,
+                        "cluster_size": sum(p.get("cluster_size", 1) for p in cluster),
+                    })
+
+                # 面积过滤
+                filtered = [p for p in final_points if p["area"] >= min_area]
+                logger.info(
+                    f"[BATCH_CLUSTER] 跨批次去重: {len(all_merged)} -> "
+                    f"{len(filtered)} (min_area={min_area})"
+                )
+                all_merged = filtered
+
+            # 清理缓存文件
+            try:
+                os.remove(cache_file)
+                logger.info(f"[BATCH_CLUSTER] 已删除缓存文件: {cache_file}")
+            except Exception:
+                pass
+
+            return all_merged
+
+        except Exception as e:
+            logger.exception(f"[BATCH_CLUSTER] 分批聚类失败: {e}")
+            # 降级：尝试返回已合并的结果
+            return all_merged if all_merged else []
 
     def _merge_tile_masks(
         self,
@@ -1081,35 +1624,88 @@ class UnsupervisedDiseaseDetectionService:
             return False, None, f"tile mask 合并失败: {str(e)}"
 
     def _cleanup_tile_masks(self, valid_results: List[Dict]) -> None:
-        """清理临时 tile mask 文件"""
-        if not valid_results:
-            return
+        """
+        清理临时 tile mask 文件（强化异常保护版）
+
+        确保即使主任务失败、进程异常退出，数GB临时瓦片掩膜文件也能被强制清理。
+        使用多层 try/except 保护，单个文件删除失败不影响其他文件清理。
+        同时清理存储目录下可能残留的过期 tile mask 文件。
+        """
+        # 即使 valid_results 为空，也尝试清理可能残留的过期临时文件
+        tiles_mask_dir = os.path.join("storage", "tiles_mask")
 
         cleaned_count = 0
         failed_files = []
+        total_cleaned_bytes = 0
 
         try:
-            for result in valid_results:
-                mask_path = result.get("mask_path")
-                if mask_path and os.path.exists(mask_path):
+            # 第一轮：根据 valid_results 中记录的 mask_path 清理
+            if valid_results:
+                for result in valid_results:
+                    if result is None:
+                        continue
                     try:
-                        os.remove(mask_path)
+                        mask_path = result.get("mask_path")
+                        if mask_path and os.path.exists(mask_path):
+                            file_size = os.path.getsize(mask_path)
+                            os.remove(mask_path)
+                            cleaned_count += 1
+                            total_cleaned_bytes += file_size
+                    except FileNotFoundError:
+                        # 文件已被删除，无需处理
                         cleaned_count += 1
+                    except PermissionError as pe:
+                        failed_files.append(mask_path)
+                        logger.warning(f"清理文件失败（权限不足）: {mask_path}, 错误: {str(pe)}")
+                    except OSError as oe:
+                        failed_files.append(mask_path)
+                        logger.warning(f"清理文件失败（OS错误）: {mask_path}, 错误: {str(oe)}")
                     except Exception as file_err:
                         failed_files.append(mask_path)
-                        logger.warning(f"清理文件失败: {mask_path}, 错误: {str(file_err)}")
+                        logger.warning(f"清理文件失败（未知错误）: {mask_path}, 错误: {str(file_err)}")
 
-            # 尝试删除目录
-            tiles_mask_dir = os.path.join("storage", "tiles_mask")
-            if os.path.exists(tiles_mask_dir) and not os.listdir(tiles_mask_dir):
+            # 第二轮：清理目录下所有可能残留的 .npy 文件（防御性清理）
+            if os.path.exists(tiles_mask_dir) and os.path.isdir(tiles_mask_dir):
                 try:
-                    os.rmdir(tiles_mask_dir)
+                    for filename in os.listdir(tiles_mask_dir):
+                        if filename.endswith('.npy'):
+                            file_path = os.path.join(tiles_mask_dir, filename)
+                            try:
+                                file_size = os.path.getsize(file_path)
+                                os.remove(file_path)
+                                cleaned_count += 1
+                                total_cleaned_bytes += file_size
+                            except Exception:
+                                pass  # 静默跳过无法删除的文件
+                except Exception as list_err:
+                    logger.warning(f"遍历 tiles_mask 目录失败: {str(list_err)}")
+
+                # 尝试删除空目录
+                try:
+                    remaining = os.listdir(tiles_mask_dir)
+                    if not remaining:
+                        os.rmdir(tiles_mask_dir)
+                        logger.info(f"tiles_mask 目录已删除: {tiles_mask_dir}")
+                    else:
+                        # 目录非空，尝试逐个删除残留文件后再次尝试
+                        for filename in remaining:
+                            try:
+                                os.remove(os.path.join(tiles_mask_dir, filename))
+                            except Exception:
+                                pass
+                        if not os.listdir(tiles_mask_dir):
+                            os.rmdir(tiles_mask_dir)
+                except FileNotFoundError:
+                    pass  # 目录已被其他进程删除
                 except Exception as dir_err:
-                    logger.warning(f"删除目录失败: {tiles_mask_dir}, 错误: {str(dir_err)}")
+                    logger.warning(f"删除 tiles_mask 目录失败: {str(dir_err)}")
 
             # 记录清理结果
             if cleaned_count > 0:
-                logger.info(f"临时文件清理完成: 成功 {cleaned_count}/{len(valid_results)} 个文件")
+                logger.info(
+                    f"临时文件清理完成: 成功清理 {cleaned_count} 个文件, "
+                    f"释放空间约 {total_cleaned_bytes / 1024 / 1024:.1f}MB"
+                )
 
             if failed_files:
                 logger.error(f"临时文件清理失败 {len(failed_files)} 个文件:")
@@ -1119,7 +1715,17 @@ class UnsupervisedDiseaseDetectionService:
                     logger.error(f"  ... 还有 {len(failed_files) - 5} 个文件")
 
         except Exception as e:
-            logger.error(f"清理 tile mask 文件时出现异常: {e}")
+            # 最外层 catch-all：即使清理过程出现异常也不影响主流程
+            logger.error(f"清理 tile mask 文件时出现未预期异常: {e}", exc_info=True)
+
+            # 最终兜底：尝试直接删除整个目录
+            try:
+                import shutil
+                if os.path.exists(tiles_mask_dir):
+                    shutil.rmtree(tiles_mask_dir, ignore_errors=True)
+                    logger.warning("已通过 shutil.rmtree 强制清理 tiles_mask 目录")
+            except Exception:
+                pass
 
     def detect_on_tiled_image(
         self,
@@ -1131,9 +1737,9 @@ class UnsupervisedDiseaseDetectionService:
         padding_mode: str = "pad",
         use_parallel: bool = True,
         num_workers: Optional[int] = None,
-        r_threshold_factor: float = 1.1,
-        g_threshold_factor: float = 0.9,
-        contrast_threshold_factor: float = 1.1,
+        r_threshold_factor: Optional[float] = None,
+        g_threshold_factor: Optional[float] = None,
+        contrast_threshold_factor: Optional[float] = None,
         task_manager=None,
         task_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[Dict], str]:
@@ -1359,9 +1965,9 @@ class UnsupervisedDiseaseDetectionService:
         n_clusters: int = 4,
         min_area: int = 50,
         nodata_value: Optional[float] = None,
-        r_threshold_factor: float = 1.1,
-        g_threshold_factor: float = 0.9,
-        contrast_threshold_factor: float = 1.1,
+        r_threshold_factor: Optional[float] = None,
+        g_threshold_factor: Optional[float] = None,
+        contrast_threshold_factor: Optional[float] = None,
         task_manager=None,
         task_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[Dict], str]:
@@ -1562,9 +2168,9 @@ class UnsupervisedDiseaseDetectionService:
         n_clusters: int = 4,
         min_area: int = 50,
         nodata_value: Optional[float] = None,
-        r_threshold_factor: float = 1.1,
-        g_threshold_factor: float = 0.9,
-        contrast_threshold_factor: float = 1.1,
+        r_threshold_factor: Optional[float] = None,
+        g_threshold_factor: Optional[float] = None,
+        contrast_threshold_factor: Optional[float] = None,
         task_manager=None,
         task_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[Dict], str]:

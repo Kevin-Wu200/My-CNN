@@ -363,10 +363,12 @@ def _run_training_task(
 
         logger.info(f"[{task_id}] 读取到 {len(points)} 个病害木点位")
 
-        # 裁剪正样本 patches（流式：按需从磁盘读取每个 Patch 区域）
+        # 裁剪正样本 patches（从磁盘按需读取每个 Patch 区域）
+        # 使用 streaming=False 模式收集完整列表用于训练集划分
+        # 对于百万级样本集，建议使用 streaming=True + 流式训练器
         patch_size = 64
         success, positive_patches, msg = SampleConstructionService.crop_patches_from_files(
-            image_files, points, patch_size=patch_size
+            image_files, points, patch_size=patch_size, streaming=False
         )
         if not success:
             raise ValueError(f"裁剪正样本失败: {msg}")
