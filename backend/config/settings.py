@@ -70,6 +70,15 @@ DETECTION_CONFIG = {
 # 可通过环境变量 MAX_MODEL_SIZE_BYTES 覆盖，支持未来更复杂的深度学习架构
 MAX_MODEL_SIZE = int(os.environ.get("MAX_MODEL_SIZE_BYTES", 2 * 1024 * 1024 * 1024))
 
+# 聚类合并距离阈值（像素），控制跨瓦片点位合并的搜索半径
+# 符合林木冠幅物理尺寸 50-100 像素范围
+# 可通过环境变量 CLUSTER_DISTANCE 覆盖
+CLUSTER_DISTANCE = float(os.environ.get("CLUSTER_DISTANCE", 80.0))
+
+# 内存水位预警阈值配置
+MEMORY_WARN_THRESHOLD = 0.8  # 内存使用率超过 80% 时发出预警
+MEMORY_CRITICAL_THRESHOLD = 0.92  # 内存使用率超过 92% 时触发降级策略
+
 # 3D-2D-1D 多维降维配置
 MULTIDIM_REDUCTION_CONFIG = {
     "enabled": True,

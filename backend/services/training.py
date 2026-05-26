@@ -111,6 +111,7 @@ class TrainingService:
         train_loader: DataLoader,
         optimizer: optim.Optimizer,
         criterion: nn.Module,
+        report_resources_every_n_batches: int = 50,
     ) -> Tuple[float, float]:
         """
         训练一个 epoch
@@ -119,10 +120,13 @@ class TrainingService:
             train_loader: 训练数据加载器
             optimizer: 优化器
             criterion: 损失函数
+            report_resources_every_n_batches: 每隔N个批次报告资源使用情况
 
         Returns:
             (平均损失, 准确率)
         """
+        from backend.utils.resource_monitor import ResourceMonitor
+
         self.model.train()
 
         total_loss = 0.0
@@ -159,6 +163,24 @@ class TrainingService:
                     f"Batch [{batch_idx + 1}/{len(train_loader)}], "
                     f"Loss: {loss.item():.4f}"
                 )
+
+            # 定期报告资源使用情况
+            if (batch_idx + 1) % report_resources_every_n_batches == 0:
+                ResourceMonitor.log_resource_status(
+                    f"训练中 Epoch batch={batch_idx + 1}/{len(train_loader)}"
+                )
+                # GPU 监控
+                if self.device == "cuda":
+                    try:
+                        gpu_mem = torch.cuda.memory_allocated() / 1024 / 1024
+                        gpu_mem_reserved = torch.cuda.memory_reserved() / 1024 / 1024
+                        logger.info(
+                            f"[GPU_MONITOR] batch={batch_idx + 1}, "
+                            f"GPU内存已分配={gpu_mem:.1f}MB, "
+                            f"GPU内存已保留={gpu_mem_reserved:.1f}MB"
+                        )
+                    except Exception:
+                        pass
 
         # 计算平均指标
         avg_loss = total_loss / total_samples

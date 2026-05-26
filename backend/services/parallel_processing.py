@@ -13,6 +13,7 @@ import time
 import os
 
 from backend.utils.resource_monitor import ResourceMonitor
+from backend.config.settings import MEMORY_WARN_THRESHOLD, MEMORY_CRITICAL_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,21 @@ class ParallelProcessingService:
             logger.info(
                 f"可用内存不足（{available_memory_gb:.1f}GB），"
                 f"减少工作进程数至 {num_workers}"
+            )
+
+        # 内存水位预警：当系统内存使用率超过阈值时进一步降级
+        mem_percent = memory_info.get('percent', 0)
+        if mem_percent > MEMORY_CRITICAL_THRESHOLD * 100:
+            num_workers = 1
+            logger.critical(
+                f"[MEMORY_CRITICAL] 系统内存使用率={mem_percent:.1f}%，"
+                f"超过临界阈值 {MEMORY_CRITICAL_THRESHOLD*100:.0f}%，强制降级为单进程"
+            )
+        elif mem_percent > MEMORY_WARN_THRESHOLD * 100:
+            num_workers = max(1, num_workers // 2)
+            logger.warning(
+                f"[MEMORY_WARN] 系统内存使用率={mem_percent:.1f}%，"
+                f"超过预警阈值 {MEMORY_WARN_THRESHOLD*100:.0f}%，工作进程数降为 {num_workers}"
             )
 
         # 确保至少有 1 个工作进程
@@ -194,6 +210,21 @@ class ParallelProcessingService:
                 f"开始并行处理分块: {len(tiles)} 个分块, "
                 f"{num_workers} 个工作进程"
             )
+
+            # 内存水位预警
+            mem_info = ResourceMonitor.get_memory_usage()
+            if mem_info.get('percent', 0) > MEMORY_WARN_THRESHOLD * 100:
+                logger.warning(
+                    f"[MEMORY_WARN] 并行处理前内存使用率={mem_info['percent']:.1f}%，"
+                    f"可用={mem_info.get('available', 0):.0f}MB，"
+                    f"建议减少 worker 数量或增加系统内存"
+                )
+            if mem_info.get('percent', 0) > MEMORY_CRITICAL_THRESHOLD * 100:
+                logger.critical(
+                    f"[MEMORY_CRITICAL] 内存使用率={mem_info['percent']:.1f}% 超过临界阈值，"
+                    f"强制降级为单进程模式"
+                )
+                num_workers = 1
 
             results = []
             errors = []

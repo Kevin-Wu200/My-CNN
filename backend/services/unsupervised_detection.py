@@ -20,6 +20,7 @@ from scipy.spatial import KDTree
 from backend.utils.tile_utils import TilingService, Tile, DEFAULT_TILE_SIZE
 from backend.services.parallel_processing import ParallelProcessingService, DEFAULT_PARALLEL_WORKERS
 from backend.utils.resource_monitor import ResourceMonitor
+from backend.config.settings import CLUSTER_DISTANCE, MEMORY_WARN_THRESHOLD, MEMORY_CRITICAL_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -679,6 +680,36 @@ class UnsupervisedDiseaseDetectionService:
             tile_data = tile.data
             H, W = tile_data.shape[:2]
 
+            # NoData 跳过机制：检测空块或高比例无效数据
+            if nodata_value is not None:
+                nodata_ratio = np.sum(tile_data == nodata_value) / tile_data.size
+                if nodata_ratio > 0.95:
+                    logger.info(
+                        f"分块 {tile.tile_index}: NoData 比例={nodata_ratio:.1%}，超过95%阈值，跳过处理"
+                    )
+                    return True, {
+                        "tile_index": tile.tile_index,
+                        "tile_row": tile.row_index,
+                        "tile_col": tile.col_index,
+                        "center_points": [],
+                        "n_candidates": 0,
+                        "skipped": True,
+                        "skip_reason": f"NoData比例={nodata_ratio:.1%}",
+                    }, "分块跳过（NoData 比例过高）"
+
+            # 全零检测
+            if np.all(tile_data == 0) or np.allclose(tile_data, 0, atol=1e-6):
+                logger.info(f"分块 {tile.tile_index}: 全零数据，跳过处理")
+                return True, {
+                    "tile_index": tile.tile_index,
+                    "tile_row": tile.row_index,
+                    "tile_col": tile.col_index,
+                    "center_points": [],
+                    "n_candidates": 0,
+                    "skipped": True,
+                    "skip_reason": "全零分块",
+                }, "分块跳过（全零数据）"
+
             # 第一步：影像归一化
             logger.debug(f"分块 {tile.tile_index}: 开始影像归一化")
             success, normalized_image, msg = self.normalize_image(
@@ -784,7 +815,7 @@ class UnsupervisedDiseaseDetectionService:
         image_height: int,
         image_width: int,
         min_area: int = 50,
-        cluster_distance: float = 80.0,
+        cluster_distance: float = CLUSTER_DISTANCE,
         task_manager=None,
         task_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[List[Dict]], str]:
@@ -800,7 +831,7 @@ class UnsupervisedDiseaseDetectionService:
             image_height: 原始影像高度（仅用于日志）
             image_width: 原始影像宽度（仅用于日志）
             min_area: 最小斑块面积阈值（用于日志）
-            cluster_distance: 跨瓦片点位聚类距离阈值（默认 80 像素，符合树冠物理尺寸 50-100 像素范围）
+            cluster_distance: 跨瓦片点位聚类距离阈值（从配置文件读取，默认 80 像素，符合树冠物理尺寸 50-100 像素范围）
             task_manager: 任务管理器（用于更新进度）
             task_id: 任务ID（用于进度跟踪）
 

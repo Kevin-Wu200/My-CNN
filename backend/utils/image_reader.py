@@ -24,19 +24,28 @@ MAX_FILE_SIZE = 20 * 1024 * 1024 * 1024
 class ImageReader:
     """影像读取工具类"""
 
+    # 已验证文件缓存：避免对同一文件重复执行基础校验
+    _validated_files: set = set()
+
     @staticmethod
-    def _validate_file(image_path: str) -> Tuple[bool, str]:
+    def _validate_file(image_path: str, use_cache: bool = True) -> Tuple[bool, str]:
         """
         验证文件是否可以读取
 
         Args:
             image_path: 影像文件路径
+            use_cache: 是否使用缓存避免重复校验（默认True）
 
         Returns:
             (验证是否通过, 错误信息)
         """
         try:
             file_path = Path(image_path)
+
+            # 缓存命中：文件已在上次校验中通过
+            abs_path = str(file_path.absolute())
+            if use_cache and abs_path in ImageReader._validated_files:
+                return True, ""
 
             # 检查文件是否存在
             if not file_path.exists():
@@ -54,6 +63,8 @@ class ImageReader:
             if file_size > MAX_FILE_SIZE:
                 return False, f"文件过大: {file_size} bytes (限制: {MAX_FILE_SIZE} bytes)"
 
+            # 校验通过，加入缓存
+            ImageReader._validated_files.add(abs_path)
             logger.info(f"[FILE_VALIDATION_PASS] filePath={image_path}, fileSize={file_size}")
             return True, ""
 
@@ -152,7 +163,7 @@ class ImageReader:
                 logger.error(f"[FILE_VALIDATION_FAILED] filePath={image_path}, error={error_msg}")
                 return False, None, error_msg
 
-            logger.info(f"[FILE_VALIDATION_PASS] filePath={image_path}")
+            logger.debug(f"[FILE_VALIDATION_PASS] filePath={image_path}")
 
             # 使用 GDAL 打开影像
             dataset = gdal.Open(str(image_path))
@@ -215,13 +226,16 @@ class ImageReader:
             # 关闭数据集
             dataset = None
 
-            logger.info(f"[CHUNK_READ_SUCCESS] filePath={image_path}, chunk=({chunk_x},{chunk_y},{chunk_width},{chunk_height})")
+            logger.debug(f"[CHUNK_READ_SUCCESS] filePath={image_path}, chunk=({chunk_x},{chunk_y},{chunk_width},{chunk_height})")
             return True, chunk_data, "影像块读取成功"
 
         except Exception as e:
             error_msg = (
                 f"读取影像块失败: {str(e)}, "
-                f"filePath={image_path}, chunk=({chunk_x},{chunk_y},{chunk_width},{chunk_height})"
+                f"filePath={image_path}, chunk=({chunk_x},{chunk_y},{chunk_width},{chunk_height}), "
+                f"bandCount={dataset.RasterCount if 'dataset' in dir() and dataset else 'N/A'}, "
+                f"imageSize=({dataset.RasterXSize if 'dataset' in dir() and dataset else 'N/A'}"
+                f"x{dataset.RasterYSize if 'dataset' in dir() and dataset else 'N/A'})"
             )
             logger.error(f"[CHUNK_READ_ERROR] {error_msg}")
             return False, None, error_msg

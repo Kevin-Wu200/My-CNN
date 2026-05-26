@@ -154,10 +154,13 @@ class SampleConstructionService:
         patch_size: int = 64,
     ) -> Tuple[bool, Optional[List[np.ndarray]], str]:
         """
-        基于磁盘文件的流式 Patch 裁剪（适用于大型遥感影像）。
+        基于磁盘文件的 Patch 裁剪（适用于大型遥感影像）。
 
         不将完整影像加载到内存，而是通过 read_image_chunk 按需读取每个 Patch 区域。
         支持多时相影像：为每个点位在所有时相影像中同步裁剪对应区域。
+
+        注意：返回值为完整 Patch 列表。对于超大样本集，建议使用
+        stream_patches_from_files 生成器模式，避免 OOM。
 
         Args:
             image_paths: 多时相影像文件路径列表
@@ -168,9 +171,25 @@ class SampleConstructionService:
             (裁剪是否成功, 裁剪后的 Patch 列表, 错误信息或成功消息)
         """
         try:
-            patches = list(SampleConstructionService.stream_patches_from_files(
+            patches = []
+            total_points = len(points)
+            from backend.utils.resource_monitor import ResourceMonitor
+
+            for batch_idx, batch in enumerate(SampleConstructionService.stream_patches_from_files(
                 image_paths, points, patch_size
-            ))
+            )):
+                patches.extend(batch)
+
+                # 每10批次检查一次内存水位
+                if batch_idx % 10 == 0 and batch_idx > 0:
+                    mem = ResourceMonitor.get_memory_usage()
+                    if mem.get('percent', 0) > 85:
+                        logger.warning(
+                            f"[MEMORY_WARN] 内存使用率={mem['percent']:.1f}%, "
+                            f"已加载 {len(patches)}/{total_points} 个Patch, "
+                            f"进程内存={mem.get('process_rss', 0):.1f}MB"
+                        )
+
             logger.info(f"已从文件流式裁剪 {len(patches)} 个多时相 Patch (patch_size={patch_size})")
             return True, patches, "流式 Patch 裁剪成功"
         except Exception as e:

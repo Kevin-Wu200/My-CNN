@@ -467,6 +467,7 @@ def _run_unsupervised_detection_safe(
     - 任何异常都被捕获，不会导致服务进程退出
     - 任务状态始终被正确更新
     - 后端 Web 服务生命周期独立于单次任务
+    - 通过 task_manager._run_with_fail_guard 统一兜底
 
     Args:
         task_id: 任务ID
@@ -474,49 +475,29 @@ def _run_unsupervised_detection_safe(
         n_clusters: K-means 聚类类别数
         min_area: 最小斑块面积阈值
     """
-    try:
-        logger.info(f"[后台任务] 开始执行任务: {task_id}")
+    import threading
 
-        # 在后台线程中创建任务，使用指定的 task_id（确保任务ID一致）
+    # 第一步：创建任务（失败则直接返回，不创建后续线程）
+    try:
         task_manager.create_task("unsupervised_detection", task_id=task_id)
         logger.info(f"[后台任务] 任务已创建: {task_id}")
-
-        # 第二步：注册当前线程
-        import threading
-        current_thread = threading.current_thread()
-        task_manager.register_thread(task_id, current_thread)
-        logger.info(f"[后台任务] 线程已注册: {task_id}, threadName={current_thread.name}")
-
-        # 立即标记为运行中
-        task_manager.start_task(task_id)
-        logger.info(f"[后台任务] 任务已标记为运行中: {task_id}")
-
-        # 执行实际任务
-        _run_unsupervised_detection(task_id, image_path, n_clusters, min_area)
-        logger.info(f"[后台任务] 任务执行完成: {task_id}")
-
     except Exception as e:
-        # 捕获所有异常，确保任务状态被正确更新
-        # 关键：这里的异常不会导致服务进程退出
-        logger.error(f"[后台任务] 任务执行异常: {task_id}, 错误: {str(e)}", exc_info=True)
+        logger.critical(f"[后台任务] 任务创建失败: {task_id}, error={str(e)}", exc_info=True)
+        return
 
-        # 如果任务已创建，标记为失败
-        if task_id in task_manager.tasks:
-            task_manager.fail_task(task_id, f"任务执行异常: {str(e)}")
-            logger.info(f"[后台任务] 任务已标记为失败: {task_id}")
-        else:
-            # 如果任务未创建，创建并标记为失败
-            try:
-                task_manager.create_task("unsupervised_detection", task_id=task_id)
-                task_manager.fail_task(task_id, f"任务初始化失败: {str(e)}")
-                logger.info(f"[后台任务] 任务已创建并标记为失败: {task_id}")
-            except Exception as create_error:
-                logger.error(f"[后台任务] 创建失败任务记录失败: {task_id}, 错误: {str(create_error)}", exc_info=True)
-    finally:
-        # 清理线程注册
-        if task_id in task_manager.active_threads:
-            del task_manager.active_threads[task_id]
-            logger.info(f"[后台任务] 线程注册已清理: {task_id}")
+    # 第二步：注册线程并启动任务
+    current_thread = threading.current_thread()
+    task_manager.register_thread(task_id, current_thread)
+    task_manager.start_task(task_id)
+    logger.info(f"[后台任务] 任务已启动: {task_id}, threadName={current_thread.name}")
+
+    # 第三步：通过全局异常拦截器执行实际任务
+    task_manager._run_with_fail_guard(
+        task_id,
+        _run_unsupervised_detection,
+        task_id, image_path, n_clusters, min_area,
+    )
+    logger.info(f"[后台任务] 任务结束: {task_id}")
 
 
 def _run_unsupervised_detection(
@@ -696,7 +677,37 @@ def _run_unsupervised_detection(
 
         task_manager.update_progress(task_id, 90, "处理结果中")
 
-        # 保存检测结果
+        # 保存检测结果（流式持久化：将候选点位分批写入磁盘）
+        from backend.utils.streaming_persistence import StreamingPersistence
+        from backend.config.settings import STORAGE_DIR
+
+        results_dir = STORAGE_DIR / "detection_results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        geojson_path = str(results_dir / f"{task_id}.geojson")
+
+        center_points = result.get("center_points", [])
+        total_points = len(center_points)
+
+        if total_points > 0:
+            # 使用流式持久化分批写入点位，避免百万级点位同时驻留内存
+            logger.info(
+                f"[{task_id}] 开始流式持久化 {total_points} 个候选点位到 {geojson_path}"
+            )
+            StreamingPersistence.batch_write_geojson(
+                iter(center_points),
+                geojson_path,
+                batch_size=5000,
+            )
+            StreamingPersistence.finalize_geojson(geojson_path)
+            logger.info(f"[{task_id}] 检测点位已持久化: {geojson_path} ({total_points} 个点)")
+        else:
+            # 空结果也写一个空 GeoJSON
+            StreamingPersistence.finalize_geojson(geojson_path)
+            # 补写空文件头
+            with open(geojson_path, "w", encoding="utf-8") as f:
+                f.write('{"type": "FeatureCollection", "features": []}\n')
+            logger.info(f"[{task_id}] 空检测结果已持久化: {geojson_path}")
+
         result_data = {
             "status": "success",
             "message": "无监督病害木检测完成",
@@ -706,7 +717,8 @@ def _run_unsupervised_detection(
             "n_candidates": result["n_candidates"],
             "method": result["method"],
             "description": result["description"],
-            "center_points": result["center_points"],
+            "result_geojson_path": geojson_path,
+            "total_points": total_points,
             "note": "该结果基于传统非监督分类方法，不是最终病害判定，适用于无标注或样本不足场景",
         }
 
