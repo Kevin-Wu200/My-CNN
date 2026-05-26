@@ -645,15 +645,11 @@ class DiseaseTreeDetectionService:
                 logger.warning(f"点位合并失败: {msg}")
                 merged_points = all_points
 
-            # 释放中间变量
-            del all_valid_results
-            gc.collect()
-
             # 第四步：结果输出
             result = {
                 "points": merged_points,
                 "n_tiles": total_tiles,
-                "n_successful_tiles": len(all_valid_results) if all_valid_results else 0,
+                "n_successful_tiles": len(all_valid_results),
                 "total_superpixels": total_superpixels,
                 "total_positive": total_positive,
                 "tile_size": tile_size,
@@ -661,6 +657,10 @@ class DiseaseTreeDetectionService:
                 "method": "分块深度学习检测方法（基于文件流式批处理）",
                 "description": "基于磁盘流式批处理的 1024×1024 分块深度学习病害木检测",
             }
+
+            # 释放中间变量
+            del all_valid_results
+            gc.collect()
 
             logger.info("基于文件的分块检测完成")
             return True, result, "基于文件的分块检测成功"

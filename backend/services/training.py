@@ -282,7 +282,6 @@ class TrainingService:
             mode="min",
             factor=0.5,
             patience=5,
-            verbose=True,
         )
 
         best_val_loss = float("inf")

@@ -117,7 +117,7 @@ async def simulate_workflow():
     task_manager.create_task("training", task_id=task_id_train)
     
     logger.info("Cropping patches from files (streamed)...")
-    success, positive_patches, msg = SampleConstructionService.crop_patches_from_files(
+    success, positive_patches_gen, msg = SampleConstructionService.crop_patches_from_files(
         image_files, sample_points, patch_size=patch_size
     )
     
@@ -125,15 +125,26 @@ async def simulate_workflow():
         logger.error(f"Sample construction failed: {msg}")
         return
 
+    positive_patches = []
+    for batch in positive_patches_gen:
+        positive_patches.extend(batch)
     logger.info(f"Generated {len(positive_patches)} positive patches")
     
     # Generate negative patches
-    success, negative_patches, msg = SampleConstructionService.generate_negative_samples_from_files(
+    success, negative_patches_gen, msg = SampleConstructionService.generate_negative_samples_from_files(
         image_files, sample_points,
         num_negative_samples=len(positive_patches),
         patch_size=patch_size,
         min_distance=100
     )
+    negative_patches = []
+    # Note: generate_negative_samples_from_files returns a list, not a generator in current implementation
+    # but let's be safe and check if it's iterable of batches or just a list of patches
+    if isinstance(negative_patches_gen, list):
+        negative_patches = negative_patches_gen
+    else:
+        for batch in negative_patches_gen:
+            negative_patches.extend(batch)
     logger.info(f"Generated {len(negative_patches)} negative patches")
 
     all_samples = positive_patches + negative_patches
