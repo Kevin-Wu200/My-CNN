@@ -32,3 +32,9 @@ frontend/src/assets/logo/logo.png
 
 # TODOList
 TODOlist/
+
+#Agent Skills
+.agents/
+skills-lock.json
+AGENTS.md
+docs/agents/

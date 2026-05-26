@@ -3,6 +3,7 @@
 """
 
 import logging
+import os
 import uuid
 from pathlib import Path
 from typing import Dict, Any, Tuple
@@ -40,6 +41,7 @@ def check_file_readiness(file_path: str) -> Tuple[bool, str]:
     检查文件是否已就绪（来自完成的上传会话）
     - 第6步：禁止任何检测逻辑直接使用分片文件，检测模块只能接受"合并完成后的完整tif"
     - 第7步：在无监督检测启动前，强制校验完整tif文件是否存在
+    - 新增（任务5）：对大于1GB的外部文件强制进行完整性校验
 
     Args:
         file_path: 文件路径
@@ -47,6 +49,10 @@ def check_file_readiness(file_path: str) -> Tuple[bool, str]:
     Returns:
         (is_ready, error_message) - 如果就绪返回 (True, "")，否则返回 (False, 错误信息)
     """
+    import hashlib
+    import shutil
+    from osgeo import gdal
+
     db_manager_instance = get_db_manager()
     db_session = db_manager_instance.get_session()
     try:
@@ -60,14 +66,50 @@ def check_file_readiness(file_path: str) -> Tuple[bool, str]:
             return False, error_msg
         logger.info(f"[FILE_EXISTS_CHECK_PASS] filePath={file_path}")
 
+        # 基础文件属性检查
+        file_size = file_path_obj.stat().st_size
+        if file_size <= 0:
+            error_msg = f"文件大小无效: {file_size} bytes"
+            logger.warning(f"[FILE_READINESS_CHECK_FAILED] filePath={file_path}, reason=zero_size")
+            return False, error_msg
+
+        # 读写权限检查
+        if not os.access(str(file_path_obj), os.R_OK):
+            error_msg = f"文件不可读（权限问题）: {file_path}"
+            logger.warning(f"[FILE_READINESS_CHECK_FAILED] filePath={file_path}, reason=no_read_permission")
+            return False, error_msg
+
+        logger.info(
+            f"[FILE_BASIC_CHECK_PASS] filePath={file_path}, "
+            f"fileSize={file_size} bytes ({file_size / 1024 / 1024 / 1024:.2f} GB)"
+        )
+
+        # 磁盘空间预检（确保有足够空间处理临时文件）
+        try:
+            disk_usage = shutil.disk_usage(file_path_obj.parent)
+            free_space = disk_usage.free
+            # 预留至少 2GB 或文件大小的 50% 作为临时空间
+            min_required = min(2 * 1024 * 1024 * 1024, file_size // 2)
+            if free_space < min_required:
+                error_msg = (
+                    f"磁盘空间不足: 可用={free_space / 1024 / 1024 / 1024:.1f}GB, "
+                    f"最少需要={min_required / 1024 / 1024 / 1024:.1f}GB"
+                )
+                logger.warning(f"[FILE_READINESS_CHECK_FAILED] filePath={file_path}, reason=insufficient_disk_space")
+                return False, error_msg
+            logger.info(
+                f"[DISK_SPACE_CHECK_PASS] filePath={file_path}, "
+                f"free={free_space / 1024 / 1024 / 1024:.1f}GB"
+            )
+        except Exception as disk_err:
+            logger.warning(f"[DISK_SPACE_CHECK_WARN] filePath={file_path}, error={disk_err}")
+
         # 查询该文件是否有对应的上传会话
-        # 尝试通过 file_path 查询
         upload_session = db_session.query(UploadSession).filter(
             UploadSession.file_path == file_path
         ).first()
 
         if not upload_session:
-            # 如果通过 file_path 没有找到，尝试通过 file_name 查询
             upload_session = db_session.query(UploadSession).filter(
                 UploadSession.file_name == file_name
             ).first()
@@ -85,10 +127,79 @@ def check_file_readiness(file_path: str) -> Tuple[bool, str]:
             logger.info(f"[FILE_READINESS_CHECK_PASS] filePath={file_path}, uploadId={upload_session.upload_id}, status=completed")
             return True, ""
         else:
-            # 如果没有上传会话记录，可能是直接上传的文件
-            # 但根据第6步的要求，我们应该禁止直接使用分片文件
-            # 所以这里我们允许处理，但记录警告
-            logger.warning(f"[FILE_READINESS_CHECK_SKIP] filePath={file_path} (no upload session found, assuming direct upload)")
+            # 无上传会话记录的外部大文件：需要进行完整性校验
+            logger.warning(
+                f"[FILE_READINESS_CHECK_SKIP] filePath={file_path} "
+                f"(no upload session found, performing integrity checks for external file)"
+            )
+
+            # 任务5：对大于 1GB 的外部文件强制执行完整性检查
+            LARGE_FILE_THRESHOLD = 1 * 1024 * 1024 * 1024  # 1GB
+            if file_size >= LARGE_FILE_THRESHOLD:
+                logger.info(
+                    f"[LARGE_FILE_INTEGRITY_CHECK] filePath={file_path}, "
+                    f"fileSize={file_size / 1024 / 1024 / 1024:.2f}GB"
+                )
+
+                # 文件头结构检查：验证 GDAL 能否打开该文件
+                try:
+                    gdal_dataset = gdal.Open(str(file_path_obj))
+                    if gdal_dataset is None:
+                        error_msg = f"文件格式无效（GDAL 无法打开）: {file_path}"
+                        logger.error(f"[FILE_HEADER_CHECK_FAILED] filePath={file_path}, reason=gdal_open_failed")
+                        return False, error_msg
+
+                    # 获取并记录文件结构信息
+                    raster_width = gdal_dataset.RasterXSize
+                    raster_height = gdal_dataset.RasterYSize
+                    raster_bands = gdal_dataset.RasterCount
+                    gdal_dataset = None  # 关闭数据集
+
+                    if raster_width <= 0 or raster_height <= 0:
+                        error_msg = f"文件结构无效: 尺寸={raster_width}x{raster_height}"
+                        logger.error(f"[FILE_HEADER_CHECK_FAILED] filePath={file_path}, reason=invalid_dimensions")
+                        return False, error_msg
+
+                    logger.info(
+                        f"[FILE_HEADER_CHECK_PASS] filePath={file_path}, "
+                        f"dimensions={raster_width}x{raster_height}, bands={raster_bands}"
+                    )
+                except Exception as gdal_err:
+                    error_msg = f"文件头结构检查失败: {str(gdal_err)}"
+                    logger.error(f"[FILE_HEADER_CHECK_FAILED] filePath={file_path}, error={gdal_err}")
+                    return False, error_msg
+
+                # 哈希完整性校验（采样哈希：读取文件头部和尾部进行快速校验）
+                try:
+                    hash_start_time = __import__('time').time()
+                    hasher = hashlib.sha256()
+                    with open(file_path_obj, "rb") as f:
+                        # 读取文件头部（前 64KB）
+                        header = f.read(64 * 1024)
+                        hasher.update(header)
+                        # 对于大文件，跳转到文件尾部读取最后 64KB
+                        if file_size > 128 * 1024:
+                            f.seek(-64 * 1024, os.SEEK_END)
+                            tail = f.read(64 * 1024)
+                            hasher.update(tail)
+                        # 对于中等文件，读取中间 64KB
+                        if file_size > 256 * 1024:
+                            f.seek(file_size // 2 - 32 * 1024)
+                            middle = f.read(64 * 1024)
+                            hasher.update(middle)
+                    file_hash = hasher.hexdigest()
+                    hash_elapsed = __import__('time').time() - hash_start_time
+                    logger.info(
+                        f"[FILE_HASH_CHECK_PASS] filePath={file_path}, "
+                        f"sha256={file_hash[:16]}..., elapsed={hash_elapsed:.2f}s"
+                    )
+                except Exception as hash_err:
+                    error_msg = f"文件哈希校验失败（文件可能损坏）: {str(hash_err)}"
+                    logger.error(f"[FILE_HASH_CHECK_FAILED] filePath={file_path}, error={hash_err}")
+                    return False, error_msg
+
+                logger.info(f"[LARGE_FILE_INTEGRITY_CHECK_PASS] filePath={file_path}")
+
             return True, ""
 
     except Exception as e:

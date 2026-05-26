@@ -1,0 +1,37 @@
+2026-05-26 10:27:26,664 - WorkflowSimulation - INFO - Starting simulation with image: /Users/wuchenkai/解译程序/20201023.tif
+2026-05-26 10:27:26,769 - backend.utils.resource_monitor - INFO - [START] 进程数=816, 线程数=1, CPU使用率=54.3%, 系统内存=7593.3MB/16384.0MB (67.7%), 进程内存=RSS 374.0MB / VMS 426005.2MB
+2026-05-26 10:27:26,769 - WorkflowSimulation - INFO - --- Step 1: Unsupervised Detection ---
+2026-05-26 10:27:26,770 - backend.services.background_task_manager - INFO - 创建任务: sim_unsup_20260526_102726 (类型: unsupervised_detection)
+2026-05-26 10:27:26,773 - backend.services.unsupervised_detection - INFO - [sim_unsup_20260526_102726] 基于文件的流式无监督检测开始
+2026-05-26 10:27:26,879 - backend.utils.resource_monitor - INFO - [文件流式检测开始 [sim_unsup_20260526_102726]] 进程数=817, 线程数=1, CPU使用率=19.8%, 系统内存=7605.4MB/16384.0MB (67.8%), 进程内存=RSS 374.1MB / VMS 426005.2MB
+2026-05-26 10:27:26,880 - backend.utils.image_reader - INFO - [FILE_VALIDATION_PASS] filePath=/Users/wuchenkai/解译程序/20201023.tif, fileSize=4341370267
+2026-05-26 10:27:26,880 - backend.utils.image_reader - INFO - [FILE_VALIDATION_PASS] filePath=/Users/wuchenkai/解译程序/20201023.tif
+2026-05-26 10:27:26,909 - backend.utils.image_reader - INFO - [IMAGE_INFO_SUCCESS] filePath=/Users/wuchenkai/解译程序/20201023.tif, info={'width': 23516, 'height': 11424, 'band_count': 4, 'data_type': 6, 'projection': 'PROJCS["WGS 84 / UTM zone 50N",GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4326"]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",117],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",0],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH],AUTHORITY["EPSG","32650"]]', 'geotransform': (755727.649, 0.5, 0.0, 3355412.31, 0.0, -0.5)}
+2026-05-26 10:27:26,910 - backend.services.unsupervised_detection - INFO - [sim_unsup_20260526_102726] 流式分块检测: 影像尺寸=23516x11424, 波段数=4, 分块尺寸=1024x1024
+2026-05-26 10:27:26,910 - backend.services.unsupervised_detection - INFO - [sim_unsup_20260526_102726] 并行参数: num_workers=8
+2026-05-26 10:27:27,016 - backend.utils.resource_monitor - INFO - [流式分块检测开始 [sim_unsup_20260526_102726]] 进程数=817, 线程数=1, CPU使用率=17.0%, 系统内存=7586.2MB/16384.0MB (67.7%), 进程内存=RSS 381.1MB / VMS 426006.2MB
+2026-05-26 10:27:27,020 - backend.services.unsupervised_detection - INFO - [sim_unsup_20260526_102726] 预计总分块数: 276 (12行 x 23列)
+2026-05-26 10:27:27,020 - backend.utils.image_reader - INFO - [FILE_VALIDATION_PASS] filePath=/Users/wuchenkai/解译程序/20201023.tif, fileSize=4341370267
+2026-05-26 10:27:27,020 - backend.utils.image_reader - INFO - [FILE_VALIDATION_PASS] filePath=/Users/wuchenkai/解译程序/20201023.tif
+2026-05-26 10:27:27,021 - backend.utils.image_reader - INFO - [IMAGE_INFO_SUCCESS] filePath=/Users/wuchenkai/解译程序/20201023.tif, info={'width': 23516, 'height': 11424, 'band_count': 4, 'data_type': 6, 'projection': 'PROJCS["WGS 84 / UTM zone 50N",GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4326"]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",117],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",0],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH],AUTHORITY["EPSG","32650"]]', 'geotransform': (755727.649, 0.5, 0.0, 3355412.31, 0.0, -0.5)}
+2026-05-26 10:27:27,021 - backend.utils.tile_utils - INFO - [DISK_TILING_START] path=/Users/wuchenkai/解译程序/20201023.tif, size=23516x11424, bands=4, tile_size=1024x1024
+2026-05-26 10:27:27,021 - backend.utils.image_reader - INFO - [FILE_VALIDATION_PASS] filePath=/Users/wuchenkai/解译程序/20201023.tif, fileSize=4341370267
+2026-05-26 10:27:27,021 - backend.utils.image_reader - INFO - [FILE_VALIDATION_PASS] filePath=/Users/wuchenkai/解译程序/20201023.tif
+2026-05-26 10:27:27,022 - backend.utils.image_reader - ERROR - [CHUNK_READ_ERROR] filePath=/Users/wuchenkai/解译程序/20201023.tif, error='Band' object has no attribute 'ReadArray'
+2026-05-26 10:27:27,022 - backend.utils.tile_utils - ERROR - [DISK_TILE_READ_FAILED] path=/Users/wuchenkai/解译程序/20201023.tif, chunk=(0,0,1024,1024), error=读取影像块失败: 'Band' object has no attribute 'ReadArray'
+2026-05-26 10:27:27,022 - backend.services.unsupervised_detection - INFO - [sim_unsup_20260526_102726] 所有批次处理完成，成功: 0/276 个分块
+2026-05-26 10:27:27,022 - WorkflowSimulation - ERROR - Unsupervised detection failed: 所有分块处理失败
+2026-05-26 10:27:27,128 - backend.utils.resource_monitor - INFO - [AFTER_UNSUPERVISED] 进程数=817, 线程数=1, CPU使用率=15.7%, 系统内存=7587.3MB/16384.0MB (67.7%), 进程内存=RSS 381.2MB / VMS 426022.2MB
+2026-05-26 10:27:27,129 - WorkflowSimulation - INFO - --- Step 2: Dummy GeoJSON Generation ---
+2026-05-26 10:27:27,129 - WorkflowSimulation - WARNING - No candidates found, using random points for simulation
+2026-05-26 10:27:27,130 - WorkflowSimulation - INFO - Generated dummy GeoJSON with 2 points at storage/temp_samples/samples.geojson
+2026-05-26 10:27:27,130 - WorkflowSimulation - INFO - --- Step 3: Model Training Simulation ---
+2026-05-26 10:27:27,130 - backend.services.background_task_manager - INFO - 创建任务: sim_train_20260526_102727 (类型: training)
+2026-05-26 10:27:27,133 - WorkflowSimulation - INFO - Cropping patches from files (streamed)...
+2026-05-26 10:27:27,134 - backend.utils.image_reader - INFO - [FILE_VALIDATION_PASS] filePath=/Users/wuchenkai/解译程序/20201023.tif, fileSize=4341370267
+2026-05-26 10:27:27,134 - backend.utils.image_reader - INFO - [FILE_VALIDATION_PASS] filePath=/Users/wuchenkai/解译程序/20201023.tif
+2026-05-26 10:27:27,135 - backend.utils.image_reader - INFO - [IMAGE_INFO_SUCCESS] filePath=/Users/wuchenkai/解译程序/20201023.tif, info={'width': 23516, 'height': 11424, 'band_count': 4, 'data_type': 6, 'projection': 'PROJCS["WGS 84 / UTM zone 50N",GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4326"]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",117],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",0],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH],AUTHORITY["EPSG","32650"]]', 'geotransform': (755727.649, 0.5, 0.0, 3355412.31, 0.0, -0.5)}
+2026-05-26 10:27:27,135 - backend.utils.image_reader - INFO - [FILE_VALIDATION_PASS] filePath=/Users/wuchenkai/解译程序/20201023.tif, fileSize=4341370267
+2026-05-26 10:27:27,135 - backend.utils.image_reader - INFO - [FILE_VALIDATION_PASS] filePath=/Users/wuchenkai/解译程序/20201023.tif
+2026-05-26 10:27:27,135 - backend.utils.image_reader - ERROR - [CHUNK_READ_ERROR] filePath=/Users/wuchenkai/解译程序/20201023.tif, error='Band' object has no attribute 'ReadArray'
+2026-05-26 10:27:27,135 - WorkflowSimulation - ERROR - Sample construction failed: 读取影像块失败: 读取影像块失败: 'Band' object has no attribute 'ReadArray'

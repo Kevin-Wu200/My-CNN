@@ -189,10 +189,25 @@ class ImageReader:
                     logger.error(f"[BAND_READ_FAILED] filePath={image_path}, band={band_idx + 1}")
                     return False, None, error_msg
 
-                band_data = band.ReadArray(chunk_x, chunk_y, chunk_width, chunk_height)
+                try:
+                    band_data = band.ReadAsArray(chunk_x, chunk_y, chunk_width, chunk_height)
+                except Exception as band_read_error:
+                    error_msg = (
+                        f"波段 {band_idx + 1} 分块读取异常: "
+                        f"chunk=({chunk_x},{chunk_y},{chunk_width},{chunk_height}), "
+                        f"error={str(band_read_error)}, "
+                        f"imagePath={image_path}, imageSize=({width},{height})"
+                    )
+                    logger.error(f"[BAND_CHUNK_READ_ERROR] {error_msg}")
+                    return False, None, error_msg
+
                 if band_data is None:
-                    error_msg = f"波段 {band_idx + 1} 块数据为空"
-                    logger.error(f"[BAND_DATA_EMPTY] filePath={image_path}, band={band_idx + 1}")
+                    error_msg = (
+                        f"波段 {band_idx + 1} 块数据为空: "
+                        f"chunk=({chunk_x},{chunk_y},{chunk_width},{chunk_height}), "
+                        f"imagePath={image_path}, imageSize=({width},{height})"
+                    )
+                    logger.error(f"[BAND_DATA_EMPTY] {error_msg}")
                     return False, None, error_msg
 
                 chunk_data[:, :, band_idx] = band_data.astype(np.float32)
@@ -204,8 +219,12 @@ class ImageReader:
             return True, chunk_data, "影像块读取成功"
 
         except Exception as e:
-            logger.error(f"[CHUNK_READ_ERROR] filePath={image_path}, error={str(e)}")
-            return False, None, f"读取影像块失败: {str(e)}"
+            error_msg = (
+                f"读取影像块失败: {str(e)}, "
+                f"filePath={image_path}, chunk=({chunk_x},{chunk_y},{chunk_width},{chunk_height})"
+            )
+            logger.error(f"[CHUNK_READ_ERROR] {error_msg}")
+            return False, None, error_msg
 
     @staticmethod
     def get_image_info(image_path: str) -> Tuple[bool, Optional[dict], str]:

@@ -349,39 +349,24 @@ def _run_training_task(
         if not geojson_files:
             raise ValueError(f"未找到 GeoJSON 标注文件，请确保样本目录中包含 .geojson 文件")
 
-        geojson_path = str(geojson_files[0])
+        # 第二步：收集影像文件路径（不加载完整影像到内存，避免 4GB+ TIFF 导致 OOM）
+        task_manager.update_progress(task_id, 20, "扫描训练影像文件")
         logger.info(
             f"[{task_id}] 发现 {len(image_files)} 个影像文件, GeoJSON: {geojson_path}"
         )
 
-        # 第二步：读取影像数据
-        task_manager.update_progress(task_id, 20, "加载训练影像")
-        images = []
-        for idx, img_path in enumerate(image_files):
-            success, img_data, msg = ImageReader.read_image(img_path)
-            if not success:
-                logger.warning(f"[{task_id}] 读取影像失败: {img_path}, {msg}")
-                continue
-            images.append(img_data)
-            logger.info(f"[{task_id}] 已加载影像 {idx + 1}/{len(image_files)}: {img_path}")
-
-        if len(images) < 1:
-            raise ValueError("未能成功加载任何影像文件")
-
-        logger.info(f"[{task_id}] 成功加载 {len(images)} 个影像")
-
-        # 第三步：读取 GeoJSON 并构建样本
-        task_manager.update_progress(task_id, 35, "构建训练样本")
+        # 第三步：读取 GeoJSON 并构建样本（使用流式方式，按需从磁盘读取）
+        task_manager.update_progress(task_id, 30, "构建训练样本（流式模式）")
         success, points, msg = SampleConstructionService.read_geojson_points(geojson_path)
         if not success:
             raise ValueError(f"读取 GeoJSON 标注失败: {msg}")
 
         logger.info(f"[{task_id}] 读取到 {len(points)} 个病害木点位")
 
-        # 裁剪正样本 patches
+        # 裁剪正样本 patches（流式：按需从磁盘读取每个 Patch 区域）
         patch_size = 64
-        success, positive_patches, msg = SampleConstructionService.crop_patches_around_points(
-            images, points, patch_size=patch_size
+        success, positive_patches, msg = SampleConstructionService.crop_patches_from_files(
+            image_files, points, patch_size=patch_size
         )
         if not success:
             raise ValueError(f"裁剪正样本失败: {msg}")
@@ -389,10 +374,10 @@ def _run_training_task(
         num_positive = len(positive_patches)
         logger.info(f"[{task_id}] 正样本数量: {num_positive}")
 
-        # 生成负样本
+        # 生成负样本（流式：按需从磁盘读取随机点位的 Patch 区域）
         num_negative = min(num_positive * 2, 500)
-        success, negative_patches, msg = SampleConstructionService.generate_negative_samples(
-            images, points,
+        success, negative_patches, msg = SampleConstructionService.generate_negative_samples_from_files(
+            image_files, points,
             num_negative_samples=num_negative,
             patch_size=patch_size,
             min_distance=100,

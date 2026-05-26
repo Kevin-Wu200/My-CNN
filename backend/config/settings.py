@@ -66,6 +66,10 @@ DETECTION_CONFIG = {
     "nms_threshold": 0.3,
 }
 
+# 模型文件大小限制配置
+# 可通过环境变量 MAX_MODEL_SIZE_BYTES 覆盖，支持未来更复杂的深度学习架构
+MAX_MODEL_SIZE = int(os.environ.get("MAX_MODEL_SIZE_BYTES", 2 * 1024 * 1024 * 1024))
+
 # 3D-2D-1D 多维降维配置
 MULTIDIM_REDUCTION_CONFIG = {
     "enabled": True,

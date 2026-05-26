@@ -16,11 +16,9 @@ import os
 import time
 
 from backend.utils.evaluation_metrics import EvaluationMetrics
+from backend.config.settings import MAX_MODEL_SIZE
 
 logger = logging.getLogger(__name__)
-
-# 模型文件大小限制（2GB）
-MAX_MODEL_SIZE = 2 * 1024 * 1024 * 1024
 
 
 class TrainingService:

@@ -15,6 +15,7 @@ from skimage.color import rgb2gray
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from scipy.ndimage import label
+from scipy.spatial import KDTree
 
 from backend.utils.tile_utils import TilingService, Tile, DEFAULT_TILE_SIZE
 from backend.services.parallel_processing import ParallelProcessingService, DEFAULT_PARALLEL_WORKERS
@@ -311,6 +312,18 @@ class UnsupervisedDiseaseDetectionService:
             inf_mask = np.isinf(feature_matrix)
             invalid_mask = nan_mask | inf_mask
 
+            # 创建有效像素掩模：标记哪些行是有效的非 NoData 像素
+            # 如果某行的所有特征都是 NaN/Inf（即 NoData 像素），标记为无效
+            row_all_invalid = np.all(invalid_mask, axis=1)
+            valid_pixel_mask = ~row_all_invalid
+            n_invalid_rows = np.sum(row_all_invalid)
+            if n_invalid_rows > 0:
+                logger.info(
+                    f"检测到 {n_invalid_rows} 个 NoData 像素行 "
+                    f"({n_invalid_rows / len(row_all_invalid) * 100:.1f}%)，"
+                    f"将在 K-means 聚类前过滤"
+                )
+
             if np.any(invalid_mask):
                 n_invalid = np.sum(invalid_mask)
                 logger.warning(
@@ -361,7 +374,7 @@ class UnsupervisedDiseaseDetectionService:
             logger.info(
                 f"特征矩阵构建完成，形状: {feature_matrix_normalized.shape}"
             )
-            return True, feature_matrix_normalized, "特征矩阵构建成功"
+            return True, (feature_matrix_normalized, valid_pixel_mask), "特征矩阵构建成功"
 
         except Exception as e:
             logger.error(f"特征矩阵构建失败: {str(e)}")
@@ -369,10 +382,13 @@ class UnsupervisedDiseaseDetectionService:
 
     def kmeans_clustering(
         self, feature_matrix: np.ndarray, n_clusters: int = 4,
-        random_state: int = 42, n_init: int = 10, max_iter: int = 300
+        random_state: int = 42, n_init: int = 10, max_iter: int = 300,
+        valid_pixel_mask: Optional[np.ndarray] = None,
     ) -> Tuple[bool, Optional[np.ndarray], Optional[np.ndarray], str]:
         """
         第四步 4.1：K-means 聚类
+
+        支持通过 valid_pixel_mask 排除 NoData 像素，防止背景无效数据干扰聚类质心计算。
 
         Args:
             feature_matrix: 标准化后的特征矩阵 (N, D)
@@ -380,6 +396,7 @@ class UnsupervisedDiseaseDetectionService:
             random_state: 随机种子（默认42）
             n_init: 初始化次数（默认10）
             max_iter: 最大迭代次数（默认300）
+            valid_pixel_mask: 有效像素掩模 (N,)，True 表示有效像素，False 表示 NoData
 
         Returns:
             (处理是否成功, 聚类标签, 聚类中心, 错误信息或成功消息)
@@ -404,6 +421,35 @@ class UnsupervisedDiseaseDetectionService:
             # 避免极端值导致KMeans计算溢出
             feature_matrix_clipped = np.clip(feature_matrix, -10, 10)
 
+            n_total = feature_matrix_clipped.shape[0]
+
+            # 如果提供了有效像素掩模，仅对有效像素进行聚类
+            if valid_pixel_mask is not None:
+                valid_indices = np.where(valid_pixel_mask)[0]
+                n_valid = len(valid_indices)
+                n_invalid = n_total - n_valid
+
+                if n_invalid > 0:
+                    logger.info(
+                        f"K-means 聚类排除 NoData 像素: "
+                        f"有效像素={n_valid}, NoData={n_invalid} "
+                        f"({n_invalid / n_total * 100:.1f}%)"
+                    )
+
+                if n_valid < n_clusters:
+                    logger.warning(
+                        f"有效像素数 ({n_valid}) 少于聚类数 ({n_clusters})，"
+                        "使用全部像素进行聚类"
+                    )
+                    feature_for_kmeans = feature_matrix_clipped
+                    use_mask = False
+                else:
+                    feature_for_kmeans = feature_matrix_clipped[valid_indices]
+                    use_mask = True
+            else:
+                feature_for_kmeans = feature_matrix_clipped
+                use_mask = False
+
             # 抑制sklearn的RuntimeWarning，因为我们已经做了充分的数值处理
             with warnings.catch_warnings():
                 warnings.filterwarnings('ignore', category=RuntimeWarning)
@@ -418,8 +464,15 @@ class UnsupervisedDiseaseDetectionService:
                     max_iter=max_iter,
                     tol=1e-4
                 )
-                labels = kmeans.fit_predict(feature_matrix_clipped)
+                labels_valid = kmeans.fit_predict(feature_for_kmeans)
                 centers = kmeans.cluster_centers_
+
+            # 如果使用了掩模，将标签映射回全尺寸数组
+            if use_mask:
+                labels = np.full(n_total, -1, dtype=np.int32)  # NoData 像素标记为 -1
+                labels[valid_indices] = labels_valid
+            else:
+                labels = labels_valid
 
             self.kmeans = kmeans
 
@@ -637,17 +690,19 @@ class UnsupervisedDiseaseDetectionService:
 
             # 第二步和第三步：特征构建与标准化
             logger.debug(f"分块 {tile.tile_index}: 开始特征构建与标准化")
-            success, feature_matrix, msg = self.construct_feature_matrix(
+            success, feature_result, msg = self.construct_feature_matrix(
                 normalized_image
             )
             if not success:
                 logger.error(f"分块 {tile.tile_index}: 特征构建失败 - {msg}")
                 return False, None, msg
+            feature_matrix, valid_pixel_mask = feature_result
 
-            # 第四步：K-means 聚类
+            # 第四步：K-means 聚类（排除 NoData 像素）
             logger.debug(f"分块 {tile.tile_index}: 开始 K-means 聚类")
             success, labels, centers, msg = self.kmeans_clustering(
-                feature_matrix, n_clusters
+                feature_matrix, n_clusters,
+                valid_pixel_mask=valid_pixel_mask,
             )
             if not success:
                 logger.error(f"分块 {tile.tile_index}: K-means 聚类失败 - {msg}")
@@ -723,6 +778,121 @@ class UnsupervisedDiseaseDetectionService:
             ResourceMonitor.log_resource_status(f"分块 {tile.tile_index} 处理异常")
             return False, None, f"分块检测失败: {str(e)}"
 
+    def _merge_tile_points(
+        self,
+        valid_results: List[Dict],
+        image_height: int,
+        image_width: int,
+        min_area: int = 50,
+        cluster_distance: float = 80.0,
+        task_manager=None,
+        task_id: Optional[str] = None,
+    ) -> Tuple[bool, Optional[List[Dict]], str]:
+        """
+        合并所有 tile 的候选中心点，使用 KD-Tree 距离聚类替代 O(N^2) 遍历。
+
+        旧方案：构建全局 mask 数组（可能 10GB+），然后进行全局连通域分析。
+        新方案：直接收集各 tile 已提取的候选中心点，通过 KD-Tree 距离聚类合并跨瓦片斑块。
+        完全取消全局 mask 的生成，避免大型影像 OOM。
+
+        Args:
+            valid_results: 有效的 tile 处理结果列表，每个结果包含 center_points
+            image_height: 原始影像高度（仅用于日志）
+            image_width: 原始影像宽度（仅用于日志）
+            min_area: 最小斑块面积阈值（用于日志）
+            cluster_distance: 跨瓦片点位聚类距离阈值（默认 80 像素，符合树冠物理尺寸 50-100 像素范围）
+            task_manager: 任务管理器（用于更新进度）
+            task_id: 任务ID（用于进度跟踪）
+
+        Returns:
+            (合并是否成功, 合并后的候选中心点列表, 错误信息或成功消息)
+        """
+        import time as _time
+
+        try:
+            merge_start = _time.time()
+            logger.info(
+                f"开始基于距离聚类的点合并: tile_count={len(valid_results)}, "
+                f"image_size={image_width}x{image_height}, cluster_distance={cluster_distance}"
+            )
+
+            # 第一步：收集所有 tile 的候选中心点（已在瓦片坐标系偏移到全局坐标）
+            all_points = []
+            total_tile_points = 0
+
+            for result in valid_results:
+                tile_points = result.get("center_points", [])
+                if tile_points:
+                    all_points.extend(tile_points)
+                total_tile_points += len(tile_points)
+
+            logger.info(
+                f"点收集完成: 总候选点数={len(all_points)}, "
+                f"来自 {len(valid_results)} 个瓦片"
+            )
+
+            if not all_points:
+                logger.info("无候选点，合并完成（空结果）")
+                return True, [], "无候选点（空结果合并成功）"
+
+            # 第二步：KD-Tree 距离聚类合并跨瓦片重复/相邻点位（O(N log N)）
+            coords = np.array([[p["x"], p["y"]] for p in all_points], dtype=np.float64)
+            tree = KDTree(coords)
+            n_points = len(all_points)
+            used = np.zeros(n_points, dtype=bool)
+            clusters = []
+
+            for i in range(n_points):
+                if used[i]:
+                    continue
+
+                # 查询以当前点为中心、cluster_distance 为半径的所有邻居
+                neighbor_indices = tree.query_ball_point(coords[i], cluster_distance)
+                cluster_indices = [idx for idx in neighbor_indices if not used[idx]]
+
+                if not cluster_indices:
+                    continue
+
+                for idx in cluster_indices:
+                    used[idx] = True
+
+                cluster = [all_points[idx] for idx in cluster_indices]
+                clusters.append(cluster)
+
+            # 第三步：对每个聚类计算合并后的中心点
+            merged_points = []
+            for cluster in clusters:
+                avg_x = float(np.mean([p["x"] for p in cluster]))
+                avg_y = float(np.mean([p["y"] for p in cluster]))
+                total_area = int(np.sum([p.get("area", 1) for p in cluster]))
+                merged_points.append({
+                    "x": avg_x,
+                    "y": avg_y,
+                    "area": total_area,
+                    "cluster_size": len(cluster),
+                })
+
+            # 过滤掉面积过小的点（可选，由调用方 min_area 控制）
+            filtered_points = [p for p in merged_points if p["area"] >= min_area]
+            if len(filtered_points) < len(merged_points):
+                logger.info(
+                    f"面积过滤: {len(merged_points)} -> {len(filtered_points)} "
+                    f"(min_area={min_area})"
+                )
+
+            merge_elapsed = _time.time() - merge_start
+            logger.info(
+                f"点合并完成: {total_tile_points} 个瓦片点 -> "
+                f"{len(clusters)} 个聚类 -> {len(filtered_points)} 个最终候选点, "
+                f"耗时={merge_elapsed:.2f}s"
+            )
+
+            return True, filtered_points, "候选点合并成功（距离聚类模式，全局无内存）"
+
+        except Exception as e:
+            logger.exception(f"候选点合并失败: {e}")
+            return False, None, f"候选点合并失败: {str(e)}"
+
     def _merge_tile_masks(
         self,
         valid_results: List[Dict],
@@ -732,7 +902,10 @@ class UnsupervisedDiseaseDetectionService:
         task_id: Optional[str] = None,
     ) -> Tuple[bool, Optional[np.ndarray], str]:
         """
-        合并所有 tile mask 文件为全局 mask
+        [已废弃] 合并所有 tile mask 文件为全局 mask。
+
+        此方法已被 _merge_tile_points 替代（非监督分类流程）。
+        保留此方法仅用于向后兼容和潜在的其他调用方。
 
         Args:
             valid_results: 有效的 tile 处理结果列表
@@ -748,6 +921,7 @@ class UnsupervisedDiseaseDetectionService:
         import time as _time
 
         try:
+            logger.warning("_merge_tile_masks 已被弃用，建议使用 _merge_tile_points（非监督分类流程已自动切换）")
             logger.info("开始执行图像合并")
             logger.info(f"tile count: {len(valid_results)}")
             logger.info(f"output size: {image_width}x{image_height}")
@@ -1085,69 +1259,27 @@ class UnsupervisedDiseaseDetectionService:
             if disk_usage.free < 1024 * 1024 * 1024:  # < 1GB
                 logger.warning(f"[{task_id}] 磁盘可用空间不足 1GB!")
 
-            logger.info(f"[{task_id}] 开始合并分块 mask")
-            success, global_mask, msg = self._merge_tile_masks(
-                valid_results, H, W, task_manager, task_id
+            logger.info(f"[{task_id}] 开始基于距离聚类的点合并（无全局内存模式）")
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 75, "合并分块候选点")
+
+            # 使用新的点合并方法（基于距离聚类，取消全局 mask 生成）
+            success, all_center_points, msg = self._merge_tile_points(
+                valid_results, H, W,
+                min_area=min_area,
+                task_manager=task_manager,
+                task_id=task_id,
             )
             if not success:
-                logger.error(f"[{task_id}] 合并 tile mask 失败: {msg}")
+                logger.error(f"[{task_id}] 点合并失败: {msg}")
                 self._cleanup_tile_masks(valid_results)
                 return False, None, msg
 
-            # 更新进度到 80%（合并完成）
+            # 更新进度到 85%
             if task_manager and task_id:
-                task_manager.update_progress(task_id, 80, "合并分块结果完成")
+                task_manager.update_progress(task_id, 85, f"点合并完成，共 {len(all_center_points)} 个候选点")
 
-            logger.info(f"[{task_id}] 合并分块结果完成")
-
-            # 第四步：在合并后的全局 mask 上进行目标提取
-            # 连通域分析 + 面积筛选 + 中心点提取
-
-            # 更新进度到 85%（开始连通域分析）
-            if task_manager and task_id:
-                task_manager.update_progress(task_id, 85, "进行连通域分析")
-
-            labeled_array, num_features = label(global_mask)
-            logger.info(f"[{task_id}] 连通域分析完成，共 {num_features} 个特征区域")
-
-            # 更新进度到 90%（开始目标提取）
-            if task_manager and task_id:
-                task_manager.update_progress(task_id, 90, f"提取目标中心点 (共{num_features}个区域)")
-
-            all_center_points = []
-            # 计算进度更新间隔（每处理5%的区域更新一次进度，避免被误判为"卡住"）
-            log_interval = max(1, num_features // 20)
-
-            for region_id in range(1, num_features + 1):
-                # 检查停止标志
-                if task_manager and task_manager.is_stop_requested(task_id):
-                    logger.info(f"[{task_id}] 检测任务被停止（中心点提取阶段，区域{region_id}/{num_features}）")
-                    self._cleanup_tile_masks(valid_results)
-                    return False, None, "检测任务被用户停止"
-
-                region_mask = labeled_array == region_id
-                region_area = np.sum(region_mask)
-                if region_area >= min_area:
-                    coords = np.where(region_mask)
-                    center_y = float(np.mean(coords[0]))
-                    center_x = float(np.mean(coords[1]))
-                    all_center_points.append({
-                        "x": center_x,
-                        "y": center_y,
-                        "area": int(region_area),
-                    })
-
-                # 每处理一定数量的区域后更新进度（90% -> 95%）
-                if region_id % log_interval == 0:
-                    progress = 90 + int((region_id / num_features) * 5)
-                    if task_manager and task_id:
-                        task_manager.update_progress(
-                            task_id,
-                            progress,
-                            f"提取目标中心点: {region_id}/{num_features}"
-                        )
-
-            logger.info(f"[{task_id}] 全局目标提取完成，共 {len(all_center_points)} 个候选点")
+            logger.info(f"[{task_id}] 点合并完成，共 {len(all_center_points)} 个候选点")
 
             # 更新进度到 95%（开始清理临时文件）
             if task_manager and task_id:
@@ -1259,9 +1391,16 @@ class UnsupervisedDiseaseDetectionService:
             if task_manager and task_id:
                 task_manager.update_progress(task_id, 15, "从磁盘生成分块")
 
-            # 从磁盘读取分块到列表（用于并行处理）
-            # 注意：分块逐个从磁盘读取并加载到内存，但同一时刻只有当前分块在内存中
-            tiles = []
+            # 计算总瓦片数量（用于进度跟踪）
+            n_rows = (H + tile_size - 1) // tile_size
+            n_cols = (W + tile_size - 1) // tile_size
+            total_tiles = n_rows * n_cols
+            logger.info(f"[{task_id}] 预计总分块数: {total_tiles} ({n_rows}行 x {n_cols}列)")
+
+            # 分批从磁盘读取并处理分块，避免将全部分块加载到内存
+            # batch_size: 每批处理的分块数（至少为 worker 数的 2 倍以保证并行效率）
+            batch_size = max(num_workers * 2, 4)
+            all_valid_results = []
             tile_generator = TilingService.generate_tiles_from_file(
                 image_path,
                 tile_size=tile_size,
@@ -1269,129 +1408,111 @@ class UnsupervisedDiseaseDetectionService:
                 spatial_ref=self.spatial_ref,
             )
 
+            batch_tiles = []
+            tile_counter = 0
+
             for tile in tile_generator:
-                tiles.append(tile)
                 if task_manager and task_manager.is_stop_requested(task_id):
                     logger.info(f"[{task_id}] 检测任务被停止（分块生成中）")
                     return False, None, "检测任务被用户停止"
 
-            logger.info(f"[{task_id}] 已从磁盘生成 {len(tiles)} 个分块")
+                batch_tiles.append(tile)
+                tile_counter += 1
 
-            if task_manager and task_id:
-                task_manager.update_progress(task_id, 20, f"生成 {len(tiles)} 个分块，开始并行处理")
-
-            # 检查停止标志
-            if task_manager and task_manager.is_stop_requested(task_id):
-                logger.info(f"[{task_id}] 检测任务被停止（并行处理前）")
-                return False, None, "检测任务被用户停止"
-
-            # 并行处理分块
-            logger.info(f"[{task_id}] 开始并行处理 {len(tiles)} 个分块，worker数={num_workers}")
-            ResourceMonitor.log_resource_status(f"流式并行处理开始 [{task_id}]")
-
-            # 为每个瓦片准备参数元组
-            tile_args = [
-                (tile, n_clusters, min_area, nodata_value, r_threshold_factor, g_threshold_factor, contrast_threshold_factor)
-                for tile in tiles
-            ]
-
-            try:
-                success, tile_results, errors, msg = (
-                    ParallelProcessingService.process_tiles_parallel(
-                        tile_args,
-                        _process_tile_for_parallel,
-                        num_workers=num_workers,
-                        error_handling="log",
-                        task_manager=task_manager,
-                        task_id=task_id,
+                # 当收集到足够的分块或处理完最后一批时，开始并行处理
+                if len(batch_tiles) >= batch_size or tile_counter == total_tiles:
+                    batch_start = tile_counter - len(batch_tiles) + 1
+                    logger.info(
+                        f"[{task_id}] 处理第 {batch_start}-{tile_counter}/{total_tiles} 个分块 "
+                        f"(batch_size={len(batch_tiles)})"
                     )
-                )
 
-                if not success and (tile_results is None or len(tile_results) == 0):
-                    return False, None, f"并行处理失败: {msg}"
+                    if task_manager and task_id:
+                        progress = 15 + int((tile_counter / total_tiles) * 45)
+                        task_manager.update_progress(
+                            task_id, progress,
+                            f"处理分块: {batch_start}-{tile_counter}/{total_tiles}"
+                        )
 
-                valid_results = [r for r in tile_results if r is not None and "error" not in r]
-                logger.info(
-                    f"[{task_id}] 并行处理完成: {len(valid_results)} 个成功, {len(errors)} 个失败"
-                )
+                    # 准备批处理参数
+                    batch_args = [
+                        (tile, n_clusters, min_area, nodata_value, r_threshold_factor, g_threshold_factor, contrast_threshold_factor)
+                        for tile in batch_tiles
+                    ]
 
-            except Exception as parallel_error:
-                logger.error(f"[{task_id}] 并行处理异常: {parallel_error}")
-                return False, None, f"并行处理失败: {str(parallel_error)}"
+                    # 并行处理本批分块
+                    try:
+                        success, batch_results, errors, msg = (
+                            ParallelProcessingService.process_tiles_parallel(
+                                batch_args,
+                                _process_tile_for_parallel,
+                                num_workers=num_workers,
+                                error_handling="log",
+                                task_manager=task_manager,
+                                task_id=task_id,
+                            )
+                        )
+                        if success or batch_results:
+                            valid_batch = [r for r in batch_results if r is not None and "error" not in r]
+                            all_valid_results.extend(valid_batch)
+                            if errors:
+                                logger.warning(
+                                    f"[{task_id}] 批次 {batch_start}-{tile_counter} 有 {len(errors)} 个分块失败"
+                                )
+                    except Exception as batch_error:
+                        logger.error(f"[{task_id}] 批次处理异常: {batch_error}")
+
+                    # 释放批次分块数据（关键：避免内存累积）
+                    batch_tiles.clear()
+                    gc.collect()
+
+            logger.info(f"[{task_id}] 所有批次处理完成，成功: {len(all_valid_results)}/{total_tiles} 个分块")
+
+            if not all_valid_results:
+                return False, None, "所有分块处理失败"
 
             # 更新进度
             if task_manager and task_id:
-                task_manager.update_progress(task_id, 60, f"分块处理完成: {len(valid_results)}/{len(tiles)} 个成功")
-
-            if not valid_results:
-                return False, None, "所有分块处理失败"
+                task_manager.update_progress(task_id, 60, f"分块处理完成: {len(all_valid_results)}/{total_tiles} 个成功")
 
             # 清理 tile mask 临时文件
-            self._cleanup_tile_masks(valid_results)
+            self._cleanup_tile_masks(all_valid_results)
 
-            # 合并分块 mask
-            logger.info(f"[{task_id}] 开始合并分块 mask")
-            success, global_mask, msg = self._merge_tile_masks(
-                valid_results, H, W, task_manager, task_id
+            # 使用点合并方法（无全局内存模式）
+            logger.info(f"[{task_id}] 开始基于距离聚类的点合并（流式模式，无全局内存）")
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 75, "合并分块候选点")
+
+            success, all_center_points, msg = self._merge_tile_points(
+                all_valid_results, H, W,
+                min_area=min_area,
+                task_manager=task_manager,
+                task_id=task_id,
             )
             if not success:
-                logger.error(f"[{task_id}] 合并 tile mask 失败: {msg}")
+                logger.error(f"[{task_id}] 点合并失败: {msg}")
                 return False, None, msg
 
             if task_manager and task_id:
-                task_manager.update_progress(task_id, 80, "合并分块结果完成")
+                task_manager.update_progress(task_id, 85, f"点合并完成，共 {len(all_center_points)} 个候选点")
 
-            # 连通域分析 + 面积筛选 + 中心点提取
-            if task_manager and task_id:
-                task_manager.update_progress(task_id, 85, "进行连通域分析和目标提取")
-
-            labeled_array, num_features = label(global_mask)
-            logger.info(f"[{task_id}] 连通域分析完成，共 {num_features} 个特征区域")
-
-            all_center_points = []
-            log_interval = max(1, num_features // 20)
-
-            for region_id in range(1, num_features + 1):
-                if task_manager and task_manager.is_stop_requested(task_id):
-                    logger.info(f"[{task_id}] 检测任务被停止（中心点提取阶段）")
-                    return False, None, "检测任务被用户停止"
-
-                region_mask = labeled_array == region_id
-                region_area = np.sum(region_mask)
-                if region_area >= min_area:
-                    coords = np.where(region_mask)
-                    center_y = float(np.mean(coords[0]))
-                    center_x = float(np.mean(coords[1]))
-                    all_center_points.append({
-                        "x": center_x,
-                        "y": center_y,
-                        "area": int(region_area),
-                    })
-
-                if region_id % log_interval == 0:
-                    progress = 90 + int((region_id / num_features) * 5)
-                    if task_manager and task_id:
-                        task_manager.update_progress(task_id, progress, f"提取目标中心点: {region_id}/{num_features}")
-
-            logger.info(f"[{task_id}] 全局目标提取完成，共 {len(all_center_points)} 个候选点")
+            logger.info(f"[{task_id}] 点合并完成，共 {len(all_center_points)} 个候选点")
 
             # 释放中间变量
-            del labeled_array
-            del global_mask
-            del valid_results
+            del all_valid_results
             gc.collect()
             ResourceMonitor.log_resource_status(f"流式分块检测完成 [{task_id}]")
 
             result = {
                 "center_points": all_center_points,
-                "n_tiles": len(tiles),
-                "n_successful_tiles": len([r for r in tile_results if r is not None and "error" not in r]),
+                "n_tiles": total_tiles,
+                "n_successful_tiles": len(all_center_points),  # 使用候选点数替代
                 "n_clusters": n_clusters,
                 "n_candidates": len(all_center_points),
                 "tile_size": tile_size,
                 "image_size": (W, H),
                 "method": "分块无监督分类方法（流式文件模式）",
-                "description": "基于文件流式读取的 1024×1024 分块光谱、纹理和空间特征无监督病害木检测",
+                "description": "基于文件流式批处理的 1024×1024 分块光谱、纹理和空间特征无监督病害木检测",
             }
 
             logger.info(f"[{task_id}] 流式分块检测完成，发现 {len(all_center_points)} 个候选区域")
@@ -1489,12 +1610,13 @@ class UnsupervisedDiseaseDetectionService:
             logger.debug(f"[{task_id}] 特征构建与标准化")
             if task_manager and task_id:
                 task_manager.update_progress(task_id, 30, "构建和标准化特征")
-            success, feature_matrix, msg = self.construct_feature_matrix(
+            success, feature_result, msg = self.construct_feature_matrix(
                 normalized_image
             )
             if not success:
                 logger.error(f"[{task_id}] 特征构建失败: {msg}")
                 return False, None, msg
+            feature_matrix, valid_pixel_mask = feature_result
 
             # 检查停止标志
             if task_manager and task_manager.is_stop_requested(task_id):
@@ -1503,9 +1625,10 @@ class UnsupervisedDiseaseDetectionService:
 
             logger.debug(f"[{task_id}] K-means 聚类")
             if task_manager and task_id:
-                task_manager.update_progress(task_id, 50, "执行K-means聚类")
+                task_manager.update_progress(task_id, 50, "执行K-means聚类（排除NoData）")
             success, labels, centers, msg = self.kmeans_clustering(
-                feature_matrix, n_clusters
+                feature_matrix, n_clusters,
+                valid_pixel_mask=valid_pixel_mask,
             )
             if not success:
                 logger.error(f"[{task_id}] K-means 聚类失败: {msg}")

@@ -344,16 +344,11 @@ def _run_detection_task(
 
             if use_tile_mode:
                 logger.info(
-                    f"[{task_id}] 影像尺寸较大 ({W}x{H})，使用瓦片模式进行深度学习检测"
+                    f"[{task_id}] 影像尺寸较大 ({W}x{H})，使用基于文件的流式分块检测（避免内存溢出）"
                 )
-                # 使用分块检测模式：先读取影像，然后分块检测
-                success, image_data, msg = ImageReader.read_image(image_path)
-                if not success:
-                    logger.error(f"[{task_id}] 读取影像失败: {image_path}, {msg}")
-                    continue
-
-                success, result, msg = detection_service.detect_on_tiled_image(
-                    image_data,
+                # 使用基于文件的流式检测：不从磁盘加载完整影像，按需读取分块
+                success, result, msg = detection_service.detect_from_file(
+                    image_path,
                     tile_size=1024,
                     padding_mode="pad",
                     use_parallel=True,

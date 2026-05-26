@@ -508,6 +508,41 @@ class BackgroundTaskManager:
         monitor_thread.start()
         logger.info(f"卡死任务监控已启动，检查间隔={check_interval}秒")
 
+    def _run_with_fail_guard(
+        self,
+        task_id: str,
+        task_func,
+        *args,
+        **kwargs,
+    ) -> None:
+        """
+        全局异常拦截器：包装任意后台任务函数，确保任何未捕获异常都会触发 fail_task。
+
+        防止因代码级报错导致前端进度卡死。所有后台任务都应通过此方法执行。
+
+        Args:
+            task_id: 任务ID
+            task_func: 要执行的任务函数
+            *args: 传递给 task_func 的位置参数
+            **kwargs: 传递给 task_func 的关键字参数
+        """
+        try:
+            task_func(*args, **kwargs)
+        except Exception as e:
+            logger.exception(f"[GLOBAL_FAIL_GUARD] taskId={task_id}, error={str(e)}")
+            try:
+                self.fail_task(task_id, f"任务执行异常（全局拦截）: {str(e)}")
+            except Exception as fail_error:
+                logger.critical(
+                    f"[FAIL_TASK_FAILED] taskId={task_id}, "
+                    f"标记失败时也出错: {str(fail_error)}"
+                )
+        finally:
+            # 清理线程跟踪
+            if task_id in self.active_threads:
+                del self.active_threads[task_id]
+            logger.info(f"[THREAD_CLEANUP] taskId={task_id}")
+
     def submit_merge_task(
         self,
         uploadId: str,
@@ -553,7 +588,7 @@ class BackgroundTaskManager:
         totalChunks: int,
     ) -> None:
         """
-        包装器：执行合并任务并清理线程跟踪
+        包装器：通过全局异常拦截器执行合并任务
 
         Args:
             task_id: 任务 ID
@@ -562,13 +597,11 @@ class BackgroundTaskManager:
             fileSize: 文件大小
             totalChunks: 总分片数
         """
-        try:
-            self._execute_merge_task(task_id, uploadId, fileName, fileSize, totalChunks)
-        finally:
-            # 清理线程跟踪
-            if task_id in self.active_threads:
-                del self.active_threads[task_id]
-            logger.info(f"[THREAD_CLEANUP] taskId={task_id}")
+        self._run_with_fail_guard(
+            task_id,
+            self._execute_merge_task,
+            task_id, uploadId, fileName, fileSize, totalChunks,
+        )
 
     def _execute_merge_task(
         self,
