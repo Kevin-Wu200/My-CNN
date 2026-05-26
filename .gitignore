@@ -20,6 +20,8 @@ storage/
 
 # Frontend
 node_modules/
+frontend/package-lock.json
+frontend/package.json
 
 # Test reports
 test_reports/
@@ -27,3 +29,6 @@ backups/
 
 # Logo
 frontend/src/assets/logo/logo.png
+
+# TODOList
+TODOlist/

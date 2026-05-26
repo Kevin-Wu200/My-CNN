@@ -60,25 +60,57 @@ export const UPLOAD_TOOLTIPS = {
     title: '训练样本上传说明',
     sections: [
       {
-        heading: '压缩包结构说明：',
+        heading: '压缩包格式要求：',
         content: [
-          'images/',
-          '存放训练影像文件，支持 jpg / png / tif',
-          'labels.geojson',
-          '样本标注文件，包含病害区域矢量信息',
-          'meta.json（可选）',
-          '数据集元信息（时间、传感器、分辨率等）',
+          '仅支持 .zip 或 .rar 格式的压缩包',
+          '不支持直接上传 TIF / JPG 等单文件',
+          '压缩包大小建议不超过 2GB',
         ],
       },
       {
-        heading: '命名与规则说明：',
+        heading: '压缩包内部结构（必需）：',
         content: [
-          '影像文件名按时间顺序，用阿拉伯数字从1开始排列命名（例：1.img、2.img、3.img...）',
-          '坐标系统需保持一致',
-          '单一压缩包对应一个训练任务',
+          'images/ 目录 — 或根目录下直接存放训练影像文件',
+          '训练影像文件 — 支持 jpg / png / tif / tiff 格式',
+          'labels.geojson — 样本标注文件，包含病害木区域矢量信息',
+        ],
+      },
+      {
+        heading: '压缩包内部结构（可选）：',
+        content: [
+          'meta.json — 数据集元信息（时间、传感器、分辨率等）',
+          'README.txt — 数据说明文档',
+        ],
+      },
+      {
+        heading: '影像命名规则：',
+        content: [
+          '影像文件名按时间顺序排列',
+          '使用阿拉伯数字从 1 开始命名（例：1.jpg、2.jpg、3.jpg...）',
+          '文件名仅用于排序，不要求特定前缀',
+        ],
+      },
+      {
+        heading: 'GeoJSON 标注要求：',
+        content: [
+          '必须为 FeatureCollection 类型',
+          '单个 Feature 类型为 Point',
+          '坐标系统需与影像保持一致',
+          '每个点代表一个病害木位置',
         ],
       },
     ],
+  },
+}
+
+export const FILE_SIZE_WARNINGS = {
+  LARGE_FILE: {
+    threshold: 500 * 1024 * 1024, // 500MB
+    message: '文件较大（超过 500MB），上传和处理可能需要较长时间，请耐心等待',
+  },
+  VERY_LARGE_FILE: {
+    threshold: 2 * 1024 * 1024 * 1024, // 2GB
+    message: '文件很大（超过 2GB），建议：\n1. 使用稳定网络上传\n2. 避免在上传过程中关闭页面\n3. 处理大型影像可能需要较长时间',
   },
 }
 

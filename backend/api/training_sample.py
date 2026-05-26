@@ -56,7 +56,16 @@ async def upload_training_sample(file: UploadFile = File(...)) -> Dict[str, Any]
         if file_ext not in [".zip", ".rar"]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"不支持的文件格式: {file_ext}，仅支持 .zip 和 .rar",
+                detail={
+                    "error": "不支持的文件格式",
+                    "message": f"不支持的文件格式: {file_ext}，仅支持 .zip 和 .rar 压缩包格式",
+                    "expected_formats": [".zip", ".rar"],
+                    "received_format": file_ext,
+                    "guidance": "训练样本必须以 ZIP 或 RAR 压缩包形式上传。"
+                                "压缩包内部必须包含：\n"
+                                "1. 训练影像文件（支持 jpg / png / tif / tiff 格式），按时间顺序用数字命名（如 1.jpg, 2.jpg...）\n"
+                                "2. 一个 GeoJSON 标注文件（.geojson），包含病害木点位矢量信息",
+                },
             )
 
         # 保存上传的文件
@@ -79,7 +88,14 @@ async def upload_training_sample(file: UploadFile = File(...)) -> Dict[str, Any]
             logger.error(f"解压失败: {message}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=message,
+                detail={
+                    "error": "解压失败",
+                    "message": message,
+                    "guidance": "请确保：\n"
+                                "1. 压缩包未损坏\n"
+                                "2. 压缩包格式正确（ZIP 或 RAR）\n"
+                                "3. 压缩包内部包含影像文件和 GeoJSON 标注文件",
+                },
             )
 
         logger.info(f"文件解压成功: {extract_dir}")
@@ -95,7 +111,15 @@ async def upload_training_sample(file: UploadFile = File(...)) -> Dict[str, Any]
             decompression_service.cleanup_temp_dir(extract_dir)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=validation_message,
+                detail={
+                    "error": "训练样本验证失败",
+                    "message": validation_message,
+                    "guidance": "训练样本压缩包必须满足以下要求：\n"
+                                "1. 包含至少一个影像文件（支持 jpg / png / tif / tiff 格式）\n"
+                                "2. 包含一个 .geojson 格式的标注文件\n"
+                                "3. 影像文件名按时间顺序用数字命名（如 1.jpg, 2.jpg, 3.jpg...）\n"
+                                "4. 坐标系统需保持一致",
+                },
             )
 
         logger.info(f"验证成功: {validation_message}")
@@ -282,32 +306,212 @@ def _run_training_task(
     """
     后台执行训练任务
 
+    接入真实的 TrainingService 训练流程：
+    1. 加载训练样本（影像 + GeoJSON 标注）
+    2. 构建正负样本
+    3. 划分训练集/验证集
+    4. 创建 CNN 模型并训练
+    5. 保存模型和训练历史
+
     Args:
         task_id: 任务ID
         sample_path: 训练样本路径
         task_name: 训练任务名称
     """
     try:
+        from backend.config.settings import TRAINING_CONFIG, MODELS_DIR
+        from backend.services.sample_construction import SampleConstructionService
+        from backend.utils.image_reader import ImageReader
+        from backend.models.cnn_model import DiseaseTreeCNN
+        from backend.models.training_dataset import create_dataloaders
+        from backend.services.training import TrainingService
+        from backend.utils.file_path_manager import FilePathManager
+        import json
+
         # 标记任务为运行中
         task_manager.start_task(task_id)
-        task_manager.update_progress(task_id, 10, "初始化训练任务")
+        task_manager.update_progress(task_id, 5, "初始化训练任务")
         logger.info(f"[{task_id}] 训练任务已启动，样本路径: {sample_path}")
 
-        # 这里应该调用实际的训练服务
-        # 目前作为占位符实现
-        task_manager.update_progress(task_id, 30, "加载训练数据中")
-        logger.info(f"[{task_id}] 开始加载训练数据")
+        sample_dir = Path(sample_path)
 
-        # 模拟训练过程
-        import time
-        time.sleep(2)
+        # 第一步：查找样本文件
+        task_manager.update_progress(task_id, 10, "扫描训练样本文件")
+        image_files = sorted([
+            str(p) for p in sample_dir.rglob("*")
+            if p.suffix.lower() in [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".img"]
+        ])
+        geojson_files = list(sample_dir.rglob("*.geojson"))
 
-        task_manager.update_progress(task_id, 60, "模型训练中")
-        logger.info(f"[{task_id}] 开始模型训练")
-        time.sleep(2)
+        if not image_files:
+            raise ValueError(f"未找到影像文件，请确保样本目录中包含 jpg/png/tif 格式的影像")
 
-        task_manager.update_progress(task_id, 90, "保存模型中")
-        logger.info(f"[{task_id}] 开始保存模型")
+        if not geojson_files:
+            raise ValueError(f"未找到 GeoJSON 标注文件，请确保样本目录中包含 .geojson 文件")
+
+        geojson_path = str(geojson_files[0])
+        logger.info(
+            f"[{task_id}] 发现 {len(image_files)} 个影像文件, GeoJSON: {geojson_path}"
+        )
+
+        # 第二步：读取影像数据
+        task_manager.update_progress(task_id, 20, "加载训练影像")
+        images = []
+        for idx, img_path in enumerate(image_files):
+            success, img_data, msg = ImageReader.read_image(img_path)
+            if not success:
+                logger.warning(f"[{task_id}] 读取影像失败: {img_path}, {msg}")
+                continue
+            images.append(img_data)
+            logger.info(f"[{task_id}] 已加载影像 {idx + 1}/{len(image_files)}: {img_path}")
+
+        if len(images) < 1:
+            raise ValueError("未能成功加载任何影像文件")
+
+        logger.info(f"[{task_id}] 成功加载 {len(images)} 个影像")
+
+        # 第三步：读取 GeoJSON 并构建样本
+        task_manager.update_progress(task_id, 35, "构建训练样本")
+        success, points, msg = SampleConstructionService.read_geojson_points(geojson_path)
+        if not success:
+            raise ValueError(f"读取 GeoJSON 标注失败: {msg}")
+
+        logger.info(f"[{task_id}] 读取到 {len(points)} 个病害木点位")
+
+        # 裁剪正样本 patches
+        patch_size = 64
+        success, positive_patches, msg = SampleConstructionService.crop_patches_around_points(
+            images, points, patch_size=patch_size
+        )
+        if not success:
+            raise ValueError(f"裁剪正样本失败: {msg}")
+
+        num_positive = len(positive_patches)
+        logger.info(f"[{task_id}] 正样本数量: {num_positive}")
+
+        # 生成负样本
+        num_negative = min(num_positive * 2, 500)
+        success, negative_patches, msg = SampleConstructionService.generate_negative_samples(
+            images, points,
+            num_negative_samples=num_negative,
+            patch_size=patch_size,
+            min_distance=100,
+        )
+        if not success:
+            logger.warning(f"[{task_id}] 负样本生成失败: {msg}，仅使用正样本")
+            negative_patches = []
+
+        logger.info(f"[{task_id}] 负样本数量: {len(negative_patches)}")
+
+        # 合并样本并生成标签
+        all_samples = positive_patches + negative_patches
+        all_labels = np.concatenate([
+            np.ones(len(positive_patches), dtype=np.int32),
+            np.zeros(len(negative_patches), dtype=np.int32),
+        ])
+
+        if len(all_samples) < 10:
+            raise ValueError(f"样本数量不足 ({len(all_samples)})，至少需要10个样本")
+
+        # 第四步：划分训练集/验证集
+        task_manager.update_progress(task_id, 45, "划分训练集和验证集")
+        success, split_result, msg = SampleConstructionService.split_train_val_test(
+            all_samples, all_labels,
+            train_ratio=TRAINING_CONFIG["train_ratio"],
+            val_ratio=TRAINING_CONFIG["val_ratio"],
+            test_ratio=0.0,
+        )
+        if not success:
+            # 回退：简单划分
+            from sklearn.model_selection import train_test_split
+            train_indices, val_indices = train_test_split(
+                np.arange(len(all_samples)),
+                train_size=TRAINING_CONFIG["train_ratio"],
+                random_state=42,
+                stratify=all_labels,
+            )
+            train_samples = [all_samples[i] for i in train_indices]
+            train_labels = all_labels[train_indices]
+            val_samples = [all_samples[i] for i in val_indices]
+            val_labels = all_labels[val_indices]
+        else:
+            train_samples = split_result["train"]["samples"]
+            train_labels = split_result["train"]["labels"]
+            val_samples = split_result["val"]["samples"]
+            val_labels = split_result["val"]["labels"]
+
+        logger.info(
+            f"[{task_id}] 样本划分: train={len(train_samples)}, val={len(val_samples)}"
+        )
+
+        # 第五步：创建 DataLoader
+        task_manager.update_progress(task_id, 50, "创建数据加载器")
+        batch_size = TRAINING_CONFIG["batch_size"]
+        train_loader, val_loader = create_dataloaders(
+            train_samples, train_labels,
+            val_samples, val_labels,
+            batch_size=batch_size,
+            num_workers=2,
+        )
+
+        # 第六步：创建模型
+        task_manager.update_progress(task_id, 55, "创建 CNN 模型")
+        # 确定输入通道数和时相数
+        sample_shape = all_samples[0].shape  # (T, H, W, C)
+        num_timesteps = sample_shape[0]
+        in_channels = sample_shape[3]
+
+        model = DiseaseTreeCNN(
+            in_channels=in_channels,
+            num_timesteps=num_timesteps,
+            base_filters=32,
+            num_classes=2,
+            dropout_rate=0.5,
+        )
+
+        # 检测并使用 GPU
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"[{task_id}] 使用设备: {device}")
+
+        # 第七步：训练模型
+        task_manager.update_progress(task_id, 60, "开始模型训练")
+        model_save_dir = FilePathManager.get_models_dir() / task_id
+        model_save_dir.mkdir(parents=True, exist_ok=True)
+
+        training_service = TrainingService(
+            model=model,
+            device=device,
+            model_save_dir=model_save_dir,
+        )
+
+        num_epochs = TRAINING_CONFIG["num_epochs"]
+        learning_rate = TRAINING_CONFIG["learning_rate"]
+
+        # 训练（带进度回调）
+        history = training_service.train(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            num_epochs=num_epochs,
+            learning_rate=learning_rate,
+            save_best_model=True,
+        )
+
+        # 第八步：保存最终模型
+        task_manager.update_progress(task_id, 95, "保存模型和训练历史")
+        model_path = model_save_dir / "final_model.pth"
+        torch.save(model.state_dict(), model_path)
+
+        history_path = model_save_dir / "training_history.json"
+        training_service.save_training_history(str(history_path))
+
+        training_summary = training_service.get_training_summary()
+
+        logger.info(
+            f"[{task_id}] 训练完成: "
+            f"best_val_loss={training_summary.get('best_val_loss', 'N/A'):.4f}, "
+            f"best_val_accuracy={training_summary.get('best_val_accuracy', 'N/A'):.4f}, "
+            f"best_val_f1={training_summary.get('best_val_f1', 'N/A'):.4f}"
+        )
 
         # 返回训练结果
         result_data = {
@@ -315,7 +519,14 @@ def _run_training_task(
             "message": "训练任务完成",
             "task_name": task_name,
             "sample_path": sample_path,
-            "model_path": f"{TRAINING_SAMPLES_DIR}/models/{task_id}.pth",
+            "model_path": str(model_path),
+            "history_path": str(history_path),
+            "training_summary": training_summary,
+            "num_samples": len(all_samples),
+            "num_positive": int(num_positive),
+            "num_negative": len(negative_patches),
+            "num_epochs": num_epochs,
+            "device": device,
         }
 
         logger.info(f"[{task_id}] 训练任务完成")
@@ -325,4 +536,6 @@ def _run_training_task(
 
     except Exception as e:
         logger.error(f"[{task_id}] 训练任务执行失败: {str(e)}")
+        import traceback
+        logger.error(f"[{task_id}] 异常详情: {traceback.format_exc()}")
         task_manager.fail_task(task_id, f"训练任务执行失败: {str(e)}")

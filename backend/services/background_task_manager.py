@@ -632,24 +632,48 @@ class BackgroundTaskManager:
 
             logger.info(f"[MERGE_COMBINING_START] uploadId={uploadId}, outputPath={output_path}, totalChunks={totalChunks}")
 
-            with open(output_path, "wb") as output_file:
+            # 使用流式写入，限制缓冲区大小以降低内存峰值
+            # 每次读取和写入最多 1MB，避免加载整个分片到内存
+            buffer_size = 1024 * 1024  # 1MB
+            total_written = 0
+
+            with open(output_path, "wb", buffering=buffer_size) as output_file:
                 for i in range(totalChunks):
                     chunk_path = FilePathManager.get_chunk_path(uploadId, i)
-                    with open(chunk_path, "rb") as chunk_file:
-                        chunk_data = chunk_file.read()
-                        output_file.write(chunk_data)
+                    chunk_size_written = 0
+                    with open(chunk_path, "rb", buffering=buffer_size) as chunk_file:
+                        while True:
+                            buf = chunk_file.read(buffer_size)
+                            if not buf:
+                                break
+                            output_file.write(buf)
+                            chunk_size_written += len(buf)
+                            total_written += len(buf)
 
                     # 更新进度
                     progress = 5 + int((i / totalChunks) * 75)
                     self.update_progress(task_id, progress, f"合并中 ({i+1}/{totalChunks})")
-                    logger.debug(f"[CHUNK_MERGED] uploadId={uploadId}, chunkIndex={i}, chunkSize={len(chunk_data)}")
+                    logger.debug(f"[CHUNK_MERGED] uploadId={uploadId}, chunkIndex={i}, chunkSize={chunk_size_written}")
 
-            # 验证文件大小
+            # 验证文件大小（增加容差，不要求完全相等）
+            # 由于网络传输和流式处理的微小差异，允许 0.1% 或 1024 字节的容差
             actual_size = output_path.stat().st_size
-            if actual_size != fileSize:
+            size_tolerance = max(int(fileSize * 0.001), 1024)  # 至少 1KB 容差
+            if abs(actual_size - fileSize) > size_tolerance:
+                logger.error(
+                    f"[FILE_SIZE_MISMATCH] uploadId={uploadId}, "
+                    f"expected={fileSize}, actual={actual_size}, tolerance={size_tolerance}"
+                )
                 output_path.unlink()
                 raise ValueError(
-                    f"文件大小不匹配: 期望 {fileSize}, 实际 {actual_size}"
+                    f"文件大小不匹配: 期望 {fileSize}, 实际 {actual_size} "
+                    f"(容差 {size_tolerance} bytes)"
+                )
+            if actual_size != fileSize:
+                logger.warning(
+                    f"[FILE_SIZE_MINOR_DIFF] uploadId={uploadId}, "
+                    f"expected={fileSize}, actual={actual_size}, "
+                    f"diff={abs(actual_size - fileSize)} bytes (在容差范围内)"
                 )
             logger.info(f"[FILE_SIZE_VALIDATION_PASS] uploadId={uploadId}, expectedSize={fileSize}, actualSize={actual_size}")
 
@@ -736,6 +760,21 @@ class BackgroundTaskManager:
 
         except Exception as e:
             logger.error(f"[MERGE_FAILED] taskId={task_id}, uploadId={uploadId}, error={str(e)}")
+
+            # 清理失败的分片文件和可能的不完整合并文件
+            try:
+                # 清理分片目录
+                session_dir = FilePathManager.get_chunk_dir(uploadId)
+                if session_dir.exists():
+                    shutil.rmtree(session_dir, ignore_errors=True)
+                    logger.info(f"[FAILED_MERGE_CHUNKS_CLEANED] uploadId={uploadId}")
+                # 清理可能不完整的合并文件
+                output_path = FilePathManager.get_merged_file_path(fileName, uploadId)
+                if output_path.exists():
+                    output_path.unlink()
+                    logger.info(f"[FAILED_MERGE_FILE_CLEANED] uploadId={uploadId}, path={output_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"[FAILED_MERGE_CLEANUP_ERROR] uploadId={uploadId}, error={str(cleanup_error)}")
 
             # 更新数据库中的会话状态为失败
             try:

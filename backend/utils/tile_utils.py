@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 # 系统默认分块尺寸
 DEFAULT_TILE_SIZE = 1024
 
+# 流式读取时缓冲区大小（1MB）
+STREAM_BUFFER_SIZE = 1024 * 1024
+
 
 class TileInfo(NamedTuple):
     """分块信息结构体"""
@@ -468,6 +471,157 @@ class TilingService:
         except Exception as e:
             logger.exception(f"分块合并失败: {e}")
             return False, None, f"分块合并失败: {str(e)}"
+
+    @staticmethod
+    def generate_tiles_from_file(
+        image_path: str,
+        tile_size: int = DEFAULT_TILE_SIZE,
+        padding_mode: str = "pad",
+        spatial_ref: Optional[Dict] = None,
+    ) -> Generator[Tile, None, Tuple[bool, str]]:
+        """
+        直接从磁盘文件按需读取分块（生成器模式），避免将完整影像加载到内存。
+
+        适用于 4GB+ 大型遥感影像，每个分块仅在需要时从磁盘读取。
+
+        Args:
+            image_path: 影像文件路径
+            tile_size: 分块尺寸（默认 1024×1024）
+            padding_mode: 边缘处理方式 ("pad" 或 "crop")
+            spatial_ref: 空间参考信息
+
+        Yields:
+            Tile 对象
+
+        Returns:
+            (生成是否成功, 错误信息或成功消息)
+        """
+        from backend.utils.image_reader import ImageReader
+
+        try:
+            if tile_size <= 0:
+                return False, "分块尺寸必须为正数"
+
+            if padding_mode not in ["pad", "crop"]:
+                return False, "padding_mode 必须为 'pad' 或 'crop'"
+
+            # 获取影像信息（不加载数据到内存）
+            success, info, msg = ImageReader.get_image_info(image_path)
+            if not success:
+                return False, f"获取影像信息失败: {msg}"
+
+            image_width = info["width"]
+            image_height = info["height"]
+            band_count = info["band_count"]
+
+            logger.info(
+                f"[DISK_TILING_START] path={image_path}, "
+                f"size={image_width}x{image_height}, bands={band_count}, "
+                f"tile_size={tile_size}x{tile_size}"
+            )
+
+            tile_index = 0
+
+            # 按行列顺序从磁盘读取分块
+            for row_idx, y in enumerate(range(0, image_height, tile_size)):
+                for col_idx, x in enumerate(range(0, image_width, tile_size)):
+                    # 计算分块的实际尺寸
+                    actual_height = min(tile_size, image_height - y)
+                    actual_width = min(tile_size, image_width - x)
+
+                    # 从磁盘读取该分块
+                    success, tile_data, chunk_msg = ImageReader.read_image_chunk(
+                        image_path, x, y, actual_width, actual_height
+                    )
+                    if not success:
+                        logger.error(
+                            f"[DISK_TILE_READ_FAILED] path={image_path}, "
+                            f"chunk=({x},{y},{actual_width},{actual_height}), "
+                            f"error={chunk_msg}"
+                        )
+                        return False, f"读取分块失败: {chunk_msg}"
+
+                    is_padded = False
+
+                    # 处理边缘块
+                    if actual_height < tile_size or actual_width < tile_size:
+                        if padding_mode == "pad":
+                            # Padding 处理
+                            pad_height = tile_size - actual_height
+                            pad_width = tile_size - actual_width
+
+                            if band_count > 1:
+                                pad_width_tuple = (
+                                    (0, pad_height),
+                                    (0, pad_width),
+                                    (0, 0),
+                                )
+                            else:
+                                pad_width_tuple = ((0, pad_height), (0, pad_width))
+
+                            tile_data = np.pad(
+                                tile_data, pad_width_tuple, mode="edge"
+                            )
+                            is_padded = True
+                        else:
+                            # crop 模式：跳过不足 tile_size 的边缘块
+                            continue
+
+                    # 创建 TileInfo
+                    tile_info = TileInfo(
+                        tile_index=tile_index,
+                        row_index=row_idx,
+                        col_index=col_idx,
+                        offset_y=y,
+                        offset_x=x,
+                        tile_height=actual_height,
+                        tile_width=actual_width,
+                        is_padded=is_padded,
+                    )
+
+                    # 创建 Tile 对象
+                    tile = Tile(tile_data, tile_info, spatial_ref)
+                    yield tile
+                    tile_index += 1
+
+            logger.info(
+                f"[DISK_TILING_COMPLETE] path={image_path}, "
+                f"tiles={tile_index}, size={image_width}x{image_height}"
+            )
+            return True, "磁盘分块生成成功"
+
+        except Exception as e:
+            logger.error(f"[DISK_TILING_ERROR] path={image_path}, error={str(e)}")
+            return False, f"磁盘分块生成失败: {str(e)}"
+
+    @staticmethod
+    def generate_tiles_from_file_list(
+        image_path: str,
+        tile_size: int = DEFAULT_TILE_SIZE,
+        padding_mode: str = "pad",
+        spatial_ref: Optional[Dict] = None,
+    ) -> Tuple[bool, Optional[List[Tile]], str]:
+        """
+        直接从磁盘文件读取所有分块到列表（非生成器版本）。
+
+        注意：对于大型影像，此方法仍会将所有分块加载到内存。
+        对于大型影像，推荐使用 generate_tiles_from_file 生成器版本。
+
+        Args:
+            image_path: 影像文件路径
+            tile_size: 分块尺寸
+            padding_mode: 边缘处理方式
+            spatial_ref: 空间参考信息
+
+        Returns:
+            (生成是否成功, Tile 对象列表, 错误信息或成功消息)
+        """
+        tiles = []
+        for tile in TilingService.generate_tiles_from_file(
+            image_path, tile_size, padding_mode, spatial_ref
+        ):
+            tiles.append(tile)
+        return True, tiles, "磁盘分块列表生成成功"
 
     @staticmethod
     def validate_tile_size(tile_size: int = DEFAULT_TILE_SIZE) -> Tuple[bool, str]:

@@ -104,6 +104,7 @@ import Card from '@/components/common/Card.vue'
 import Button from '@/components/common/Button.vue'
 import ProgressPopup from '@/components/common/ProgressPopup.vue'
 import { taskManager } from '@/services/taskManager'
+import { FILE_SIZE_WARNINGS } from '@/constants'
 import type { EnhancedTask } from '@/types'
 
 const router = useRouter()
@@ -111,7 +112,7 @@ const fileInput = ref<HTMLInputElement>()
 const selectedFiles = ref<File[]>([])
 const temporalType = ref('single')
 const isUploading = ref(false)
-const uploadStatus = ref<{ type: 'success' | 'error'; message: string } | null>(null)
+const uploadStatus = ref<{ type: 'success' | 'error' | 'warning'; message: string } | null>(null)
 
 // 订阅任务状态
 const currentTask = ref<EnhancedTask | null>(null)
@@ -151,6 +152,9 @@ const handleFileSelect = (event: Event) => {
   if (files) {
     selectedFiles.value = Array.from(files)
     uploadStatus.value = null
+
+    // 检查所有文件的总大小
+    checkTotalFileSizeWarning()
   }
 }
 
@@ -159,11 +163,20 @@ const handleDrop = (event: DragEvent) => {
   if (files) {
     selectedFiles.value = Array.from(files)
     uploadStatus.value = null
+
+    // 检查所有文件的总大小
+    checkTotalFileSizeWarning()
   }
 }
 
 const removeFile = (index: number) => {
   selectedFiles.value.splice(index, 1)
+  // 重新检查总大小
+  if (selectedFiles.value.length > 0) {
+    checkTotalFileSizeWarning()
+  } else {
+    uploadStatus.value = null
+  }
 }
 
 const formatFileSize = (bytes: number): string => {
@@ -172,6 +185,26 @@ const formatFileSize = (bytes: number): string => {
   const sizes = ['B', 'KB', 'MB', 'GB']
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i]
+}
+
+const checkTotalFileSizeWarning = () => {
+  const totalSize = selectedFiles.value.reduce((sum, f) => sum + f.size, 0)
+
+  if (uploadStatus.value?.type === 'warning') {
+    uploadStatus.value = null
+  }
+
+  if (totalSize > FILE_SIZE_WARNINGS.VERY_LARGE_FILE.threshold) {
+    uploadStatus.value = {
+      type: 'warning',
+      message: FILE_SIZE_WARNINGS.VERY_LARGE_FILE.message.replace(/\n/g, '；'),
+    }
+  } else if (totalSize > FILE_SIZE_WARNINGS.LARGE_FILE.threshold) {
+    uploadStatus.value = {
+      type: 'warning',
+      message: FILE_SIZE_WARNINGS.LARGE_FILE.message,
+    }
+  }
 }
 
 const closePopup = () => {
@@ -407,6 +440,11 @@ onUnmounted(() => {
   border-left: 4px solid #ff3b30;
 }
 
+.upload-status.warning {
+  background-color: #fffbf0;
+  border-left: 4px solid #f0ad4e;
+}
+
 .status-message {
   font-size: 14px;
   margin: 0;
@@ -418,5 +456,9 @@ onUnmounted(() => {
 
 .upload-status.error .status-message {
   color: #ff3b30;
+}
+
+.upload-status.warning .status-message {
+  color: #8a6d3b;
 }
 </style>

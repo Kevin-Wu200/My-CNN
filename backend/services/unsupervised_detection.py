@@ -17,7 +17,7 @@ from sklearn.preprocessing import StandardScaler
 from scipy.ndimage import label
 
 from backend.utils.tile_utils import TilingService, Tile, DEFAULT_TILE_SIZE
-from backend.services.parallel_processing import ParallelProcessingService
+from backend.services.parallel_processing import ParallelProcessingService, DEFAULT_PARALLEL_WORKERS
 from backend.utils.resource_monitor import ResourceMonitor
 
 logger = logging.getLogger(__name__)
@@ -1189,6 +1189,220 @@ class UnsupervisedDiseaseDetectionService:
             logger.error(f"[{task_id}] 分块检测失败: {str(e)}")
             ResourceMonitor.log_resource_status(f"分块检测异常 [{task_id}]")
             return False, None, f"分块检测失败: {str(e)}"
+
+    def detect_from_file(
+        self,
+        image_path: str,
+        n_clusters: int = 4,
+        min_area: int = 50,
+        nodata_value: Optional[float] = None,
+        r_threshold_factor: float = 1.1,
+        g_threshold_factor: float = 0.9,
+        contrast_threshold_factor: float = 1.1,
+        task_manager=None,
+        task_id: Optional[str] = None,
+    ) -> Tuple[bool, Optional[Dict], str]:
+        """
+        基于文件的流式无监督病害木检测（适用于大型遥感影像）。
+
+        直接从磁盘文件按需读取分块，避免将完整影像（如4GB TIFF）加载到内存。
+        使用 generate_tiles_from_file 生成器模式，每个分块仅在处理时从磁盘读取。
+
+        Args:
+            image_path: 影像文件路径
+            n_clusters: K-means 聚类类别数
+            min_area: 最小斑块面积阈值
+            nodata_value: NoData 像元值
+            r_threshold_factor: 红波段阈值因子
+            g_threshold_factor: 绿波段阈值因子
+            contrast_threshold_factor: 对比度阈值因子
+            task_manager: 任务管理器（用于更新进度）
+            task_id: 任务ID（用于进度跟踪）
+
+        Returns:
+            (检测是否成功, 检测结果字典, 错误信息或成功消息)
+        """
+        from backend.utils.image_reader import ImageReader
+        import gc
+        import multiprocessing as mp
+
+        try:
+            logger.info(f"[{task_id}] 基于文件的流式无监督检测开始")
+            ResourceMonitor.log_resource_status(f"文件流式检测开始 [{task_id}]")
+
+            # 获取影像信息（不加载完整数据）
+            success, info, msg = ImageReader.get_image_info(image_path)
+            if not success:
+                return False, None, f"获取影像信息失败: {msg}"
+
+            W = info["width"]
+            H = info["height"]
+            B = info["band_count"]
+
+            tile_size = min(DEFAULT_TILE_SIZE, 1024)
+
+            num_workers = min(DEFAULT_PARALLEL_WORKERS, mp.cpu_count() - 1)
+            num_workers = max(1, min(num_workers, mp.cpu_count() - 1))
+
+            logger.info(
+                f"[{task_id}] 流式分块检测: 影像尺寸={W}x{H}, "
+                f"波段数={B}, 分块尺寸={tile_size}x{tile_size}"
+            )
+            logger.info(f"[{task_id}] 并行参数: num_workers={num_workers}")
+            ResourceMonitor.log_resource_status(f"流式分块检测开始 [{task_id}]")
+
+            # 检查停止标志
+            if task_manager and task_manager.is_stop_requested(task_id):
+                logger.info(f"[{task_id}] 检测任务被停止（开始前）")
+                return False, None, "检测任务被用户停止"
+
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 15, "从磁盘生成分块")
+
+            # 从磁盘读取分块到列表（用于并行处理）
+            # 注意：分块逐个从磁盘读取并加载到内存，但同一时刻只有当前分块在内存中
+            tiles = []
+            tile_generator = TilingService.generate_tiles_from_file(
+                image_path,
+                tile_size=tile_size,
+                padding_mode="pad",
+                spatial_ref=self.spatial_ref,
+            )
+
+            for tile in tile_generator:
+                tiles.append(tile)
+                if task_manager and task_manager.is_stop_requested(task_id):
+                    logger.info(f"[{task_id}] 检测任务被停止（分块生成中）")
+                    return False, None, "检测任务被用户停止"
+
+            logger.info(f"[{task_id}] 已从磁盘生成 {len(tiles)} 个分块")
+
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 20, f"生成 {len(tiles)} 个分块，开始并行处理")
+
+            # 检查停止标志
+            if task_manager and task_manager.is_stop_requested(task_id):
+                logger.info(f"[{task_id}] 检测任务被停止（并行处理前）")
+                return False, None, "检测任务被用户停止"
+
+            # 并行处理分块
+            logger.info(f"[{task_id}] 开始并行处理 {len(tiles)} 个分块，worker数={num_workers}")
+            ResourceMonitor.log_resource_status(f"流式并行处理开始 [{task_id}]")
+
+            # 为每个瓦片准备参数元组
+            tile_args = [
+                (tile, n_clusters, min_area, nodata_value, r_threshold_factor, g_threshold_factor, contrast_threshold_factor)
+                for tile in tiles
+            ]
+
+            try:
+                success, tile_results, errors, msg = (
+                    ParallelProcessingService.process_tiles_parallel(
+                        tile_args,
+                        _process_tile_for_parallel,
+                        num_workers=num_workers,
+                        error_handling="log",
+                        task_manager=task_manager,
+                        task_id=task_id,
+                    )
+                )
+
+                if not success and (tile_results is None or len(tile_results) == 0):
+                    return False, None, f"并行处理失败: {msg}"
+
+                valid_results = [r for r in tile_results if r is not None and "error" not in r]
+                logger.info(
+                    f"[{task_id}] 并行处理完成: {len(valid_results)} 个成功, {len(errors)} 个失败"
+                )
+
+            except Exception as parallel_error:
+                logger.error(f"[{task_id}] 并行处理异常: {parallel_error}")
+                return False, None, f"并行处理失败: {str(parallel_error)}"
+
+            # 更新进度
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 60, f"分块处理完成: {len(valid_results)}/{len(tiles)} 个成功")
+
+            if not valid_results:
+                return False, None, "所有分块处理失败"
+
+            # 清理 tile mask 临时文件
+            self._cleanup_tile_masks(valid_results)
+
+            # 合并分块 mask
+            logger.info(f"[{task_id}] 开始合并分块 mask")
+            success, global_mask, msg = self._merge_tile_masks(
+                valid_results, H, W, task_manager, task_id
+            )
+            if not success:
+                logger.error(f"[{task_id}] 合并 tile mask 失败: {msg}")
+                return False, None, msg
+
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 80, "合并分块结果完成")
+
+            # 连通域分析 + 面积筛选 + 中心点提取
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 85, "进行连通域分析和目标提取")
+
+            labeled_array, num_features = label(global_mask)
+            logger.info(f"[{task_id}] 连通域分析完成，共 {num_features} 个特征区域")
+
+            all_center_points = []
+            log_interval = max(1, num_features // 20)
+
+            for region_id in range(1, num_features + 1):
+                if task_manager and task_manager.is_stop_requested(task_id):
+                    logger.info(f"[{task_id}] 检测任务被停止（中心点提取阶段）")
+                    return False, None, "检测任务被用户停止"
+
+                region_mask = labeled_array == region_id
+                region_area = np.sum(region_mask)
+                if region_area >= min_area:
+                    coords = np.where(region_mask)
+                    center_y = float(np.mean(coords[0]))
+                    center_x = float(np.mean(coords[1]))
+                    all_center_points.append({
+                        "x": center_x,
+                        "y": center_y,
+                        "area": int(region_area),
+                    })
+
+                if region_id % log_interval == 0:
+                    progress = 90 + int((region_id / num_features) * 5)
+                    if task_manager and task_id:
+                        task_manager.update_progress(task_id, progress, f"提取目标中心点: {region_id}/{num_features}")
+
+            logger.info(f"[{task_id}] 全局目标提取完成，共 {len(all_center_points)} 个候选点")
+
+            # 释放中间变量
+            del labeled_array
+            del global_mask
+            del valid_results
+            gc.collect()
+            ResourceMonitor.log_resource_status(f"流式分块检测完成 [{task_id}]")
+
+            result = {
+                "center_points": all_center_points,
+                "n_tiles": len(tiles),
+                "n_successful_tiles": len([r for r in tile_results if r is not None and "error" not in r]),
+                "n_clusters": n_clusters,
+                "n_candidates": len(all_center_points),
+                "tile_size": tile_size,
+                "image_size": (W, H),
+                "method": "分块无监督分类方法（流式文件模式）",
+                "description": "基于文件流式读取的 1024×1024 分块光谱、纹理和空间特征无监督病害木检测",
+            }
+
+            logger.info(f"[{task_id}] 流式分块检测完成，发现 {len(all_center_points)} 个候选区域")
+            return True, result, "流式分块检测成功"
+
+        except Exception as e:
+            logger.error(f"[{task_id}] 流式分块检测异常: {str(e)}")
+            import traceback
+            logger.error(f"[{task_id}] 异常详情: {traceback.format_exc()}")
+            ResourceMonitor.log_resource_status(f"流式分块检测异常 [{task_id}]")
+            return False, None, f"流式分块检测失败: {str(e)}"
 
     def detect(
         self,

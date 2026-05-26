@@ -94,7 +94,7 @@ import { useRouter } from 'vue-router'
 import Card from '@/components/common/Card.vue'
 import Button from '@/components/common/Button.vue'
 import { apiClient } from '@/services/api'
-import { UPLOAD_TOOLTIPS } from '@/constants'
+import { UPLOAD_TOOLTIPS, FILE_SIZE_WARNINGS } from '@/constants'
 
 const router = useRouter()
 const fileInput = ref<HTMLInputElement>()
@@ -103,7 +103,7 @@ const isUploading = ref(false)
 const showTooltip = ref(false)
 const tooltipTimer = ref<ReturnType<typeof setTimeout> | null>(null)
 const validationStatus = ref<{
-  type: 'success' | 'error'
+  type: 'success' | 'error' | 'warning'
   message: string
   details?: string[]
 } | null>(null)
@@ -120,6 +120,9 @@ const handleFileSelect = (event: Event) => {
   if (files && files.length > 0) {
     selectedFile.value = files[0]
     validationStatus.value = null
+
+    // 检查文件大小并显示相应警告
+    checkFileSizeWarning(files[0])
   }
 }
 
@@ -128,6 +131,9 @@ const handleDrop = (event: DragEvent) => {
   if (files && files.length > 0) {
     selectedFile.value = files[0]
     validationStatus.value = null
+
+    // 检查文件大小并显示相应警告
+    checkFileSizeWarning(files[0])
   }
 }
 
@@ -137,6 +143,25 @@ const formatFileSize = (bytes: number): string => {
   const sizes = ['B', 'KB', 'MB', 'GB']
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i]
+}
+
+const checkFileSizeWarning = (file: File) => {
+  // 清除之前的警告
+  if (validationStatus.value?.type === 'warning') {
+    validationStatus.value = null
+  }
+
+  if (file.size > FILE_SIZE_WARNINGS.VERY_LARGE_FILE.threshold) {
+    validationStatus.value = {
+      type: 'warning',
+      message: FILE_SIZE_WARNINGS.VERY_LARGE_FILE.message.replace(/\n/g, '；'),
+    }
+  } else if (file.size > FILE_SIZE_WARNINGS.LARGE_FILE.threshold) {
+    validationStatus.value = {
+      type: 'warning',
+      message: FILE_SIZE_WARNINGS.LARGE_FILE.message,
+    }
+  }
 }
 
 const startTooltipTimer = () => {
@@ -402,6 +427,11 @@ const goToNextStep = () => {
   border-left: 4px solid #ff3b30;
 }
 
+.validation-result.warning {
+  background-color: #fffbf0;
+  border-left: 4px solid #f0ad4e;
+}
+
 .status-message {
   font-size: 14px;
   font-weight: 500;
@@ -414,6 +444,10 @@ const goToNextStep = () => {
 
 .validation-result.error .status-message {
   color: #ff3b30;
+}
+
+.validation-result.warning .status-message {
+  color: #8a6d3b;
 }
 
 .status-details {

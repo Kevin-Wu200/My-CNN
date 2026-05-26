@@ -474,19 +474,55 @@ def _run_unsupervised_detection(
                 logger.error(f"[{task_id}] 调度文件清理失败: {str(cleanup_error)}")
             return
 
-        task_manager.update_progress(task_id, 10, "读取影像中")
-        logger.info(f"[{task_id}] 开始读取影像")
+        task_manager.update_progress(task_id, 10, "获取影像信息")
+        logger.info(f"[{task_id}] 开始获取影像信息（不加载完整数据到内存）")
 
-        # 读取影像
-        logger.debug(f"[{task_id}] 读取影像: {image_path}")
-        success, image_data, msg = image_reader.read_image(image_path)
+        # 第一步：获取影像基本信息（不加载完整数据到内存）
+        success, image_info, msg = image_reader.get_image_info(image_path)
         if not success:
-            logger.error(f"[{task_id}] 影像读取失败: {msg}")
-            task_manager.fail_task(task_id, f"影像读取失败: {msg}")
+            logger.error(f"[{task_id}] 获取影像信息失败: {msg}")
+            task_manager.fail_task(task_id, f"获取影像信息失败: {msg}")
             return
 
-        logger.info(f"[{task_id}] 影像读取成功，尺寸: {image_data.shape}")
-        ResourceMonitor.log_resource_status(f"影像读取完成 [{task_id}]")
+        image_width = image_info["width"]
+        image_height = image_info["height"]
+        image_band_count = image_info["band_count"]
+        total_pixels = image_width * image_height
+
+        logger.info(
+            f"[{task_id}] 影像信息获取成功: "
+            f"尺寸={image_width}x{image_height}, "
+            f"波段数={image_band_count}, "
+            f"总像素数={total_pixels}"
+        )
+        ResourceMonitor.log_resource_status(f"影像信息获取完成 [{task_id}]")
+
+        # 判断是否需要分块读取（大影像 > 5000x5000 像素）
+        # 对于大型影像，直接使用文件路径模式，避免将完整影像加载到内存
+        use_file_based_detection = total_pixels > 25000000  # 5000x5000
+
+        if use_file_based_detection:
+            logger.info(
+                f"[{task_id}] 影像尺寸较大 ({image_width}x{image_height})，"
+                f"使用基于文件的流式检测模式（避免内存溢出）"
+            )
+            # 使用文件路径模式：直接传递文件路径，在服务层按需读取分块
+            image_data = None
+        else:
+            logger.info(
+                f"[{task_id}] 影像尺寸较小 ({image_width}x{image_height})，"
+                f"使用内存模式读取完整影像"
+            )
+            # 小影像：读取到内存
+            logger.debug(f"[{task_id}] 读取影像: {image_path}")
+            success, image_data, msg = image_reader.read_image(image_path)
+            if not success:
+                logger.error(f"[{task_id}] 影像读取失败: {msg}")
+                task_manager.fail_task(task_id, f"影像读取失败: {msg}")
+                return
+
+            logger.info(f"[{task_id}] 影像读取成功，尺寸: {image_data.shape}")
+            ResourceMonitor.log_resource_status(f"影像读取完成 [{task_id}]")
 
         # 第三步：检查停止标志
         if task_manager.is_stop_requested(task_id):
@@ -503,15 +539,27 @@ def _run_unsupervised_detection(
 
         task_manager.update_progress(task_id, 30, "执行检测中")
 
-        # 执行无监督检测，传递任务管理器用于进度跟踪
-        logger.info(f"[{task_id}] 开始执行无监督检测")
-        success, result, msg = detection_service.detect(
-            image_data,
-            n_clusters=n_clusters,
-            min_area=min_area,
-            task_manager=task_manager,
-            task_id=task_id,
-        )
+        # 执行无监督检测
+        if use_file_based_detection:
+            # 基于文件的流式检测模式（大影像，不加载完整数据到内存）
+            logger.info(f"[{task_id}] 开始执行基于文件的无监督检测（流式分块模式）")
+            success, result, msg = detection_service.detect_from_file(
+                image_path,
+                n_clusters=n_clusters,
+                min_area=min_area,
+                task_manager=task_manager,
+                task_id=task_id,
+            )
+        else:
+            # 内存模式（小影像）
+            logger.info(f"[{task_id}] 开始执行无监督检测（内存模式）")
+            success, result, msg = detection_service.detect(
+                image_data,
+                n_clusters=n_clusters,
+                min_area=min_area,
+                task_manager=task_manager,
+                task_id=task_id,
+            )
 
         if not success:
             logger.error(f"[{task_id}] 检测失败: {msg}")
@@ -542,7 +590,7 @@ def _run_unsupervised_detection(
             "status": "success",
             "message": "无监督病害木检测完成",
             "image_path": image_path,
-            "image_shape": image_data.shape,
+            "image_shape": list(image_data.shape) if image_data is not None else [image_height, image_width, image_band_count],
             "n_clusters": result["n_clusters"],
             "n_candidates": result["n_candidates"],
             "method": result["method"],
